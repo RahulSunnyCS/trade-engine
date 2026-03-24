@@ -51,7 +51,7 @@ This system is an **adaptive, multi-personality paper trading framework** design
 
 **In Scope:**
 - Real-time straddle monitoring and rate-of-change analysis
-- Multi-personality paper trading execution via Quantiply
+- Multi-personality paper trading execution via Fyers Paper Trading API
 - End-of-day retrospection and parameter evolution
 - Time-staggered entry analysis (5-min, 10-min intervals)
 - Performance dashboards and reporting
@@ -240,7 +240,7 @@ The system should be abandoned or redesigned if:
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                      DATA INGESTION LAYER                           │   │
 │  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐           │   │
-│  │  │ Market Feed   │  │ Quantiply    │  │ India VIX     │           │   │
+│  │  │ Market Feed   │  │ Fyers        │  │ India VIX     │           │   │
 │  │  │ (WebSocket)   │  │ Paper API    │  │ Feed          │           │   │
 │  │  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘           │   │
 │  │          │                  │                  │                    │   │
@@ -284,7 +284,7 @@ The system should be abandoned or redesigned if:
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                    EXECUTION LAYER                                  │   │
 │  │  ┌─────────────────────────────────────────────────────────────┐   │   │
-│  │  │              Quantiply Paper Trading API                     │   │   │
+│  │  │              Fyers Paper Trading API                        │   │   │
 │  │  │  • Order placement    • Position tracking   • P&L compute   │   │   │
 │  │  └─────────────────────────────────────────────────────────────┘   │   │
 │  └──────────────────────────────┬──────────────────────────────────────┘   │
@@ -389,7 +389,7 @@ The system should be abandoned or redesigned if:
 | **ROC Engine** | Calculate rate-of-change metrics | Straddle time-series | ROC values, acceleration | Critical |
 | **Signal Generator** | Detect entry opportunities | ROC, time, VIX | Signal events with probability | Critical |
 | **Personality Router** | Route signals to appropriate bots | Signal + bot configs | Filtered trade decisions | High |
-| **Trade Executor** | Execute paper trades via Quantiply | Trade decisions | Order confirmations | High |
+| **Trade Executor** | Execute paper trades via Fyers Paper Trading API | Trade decisions | Order confirmations | High |
 | **Position Manager** | Track open positions, P&L | Executed trades | Position state | High |
 | **Retrospection Engine** | Analyze and evolve parameters | Trade history | Updated parameters | Medium |
 | **Dashboard Server** | Serve real-time UI | All system state | React UI | Low |
@@ -818,8 +818,12 @@ CREATE TABLE timing_analysis (
 | **Charts** | Lightweight Charts (TradingView) | Professional trading charts, OHLC support |
 | **State Management** | Zustand | Minimal, performant, no boilerplate |
 | **Styling** | Tailwind CSS | Rapid UI development, consistent design system |
+| **DB Migrations** | Drizzle ORM | Type-safe schema-as-code, auto-generated SQL migrations, native Bun/TypeScript, works with TimescaleDB |
 | **Testing** | Vitest + Playwright | Fast unit tests, E2E for critical flows |
-| **Deployment** | Docker + Railway/Fly.io | Simple deployment, auto-scaling, cost-effective |
+| **Local Dev** | Docker Compose | TimescaleDB + Redis in containers; matches prod schema exactly |
+| **Deployment** | Hetzner CX32 VPS (prod) | 4 vCPU / 8GB RAM, €14.90/month; cost-effective for this workload |
+| **Managed DB (prod)** | Timescale Cloud free tier | 10GB, auto-backups, no ops overhead for prod TimescaleDB |
+| **Secrets** | `.env` (dev) / GitHub Secrets (CI) / `systemd EnvironmentFile` (prod) | No secrets manager overhead at this scale |
 
 ### 7.2 Detailed Justifications
 
@@ -1012,6 +1016,82 @@ const useTradingStore = create<TradingState>((set) => ({
   }))
 }));
 ```
+
+#### 7.2.6 Why Drizzle ORM for Migrations?
+
+**Problem:** Schema changes to PostgreSQL/TimescaleDB must be versioned, reproducible, and safe to run in CI and production without manual SQL.
+
+**Options considered:**
+
+| Tool | Verdict |
+|------|---------|
+| **Prisma** | Too heavy; generates its own query layer; poor TimescaleDB hypertable support |
+| **Flyway** | Java-based; doesn't integrate with TypeScript toolchain |
+| **Raw SQL migrations** | No type safety; schema drift between TypeScript types and DB |
+| **Drizzle ORM** | ✅ Schema-as-TypeScript → auto-generates SQL; native Bun; works alongside raw SQL for hypertables |
+
+**Drizzle workflow:**
+```typescript
+// src/db/schema/market-ticks.ts — source of truth
+import { pgTable, timestamp, varchar, numeric, integer } from 'drizzle-orm/pg-core';
+
+export const marketTicks = pgTable('market_ticks', {
+  time:       timestamp('time', { withTimezone: true }).notNull(),
+  underlying: varchar('underlying', { length: 20 }).notNull(),
+  symbol:     varchar('symbol', { length: 60 }).notNull(),
+  ltp:        numeric('ltp', { precision: 10, scale: 2 }).notNull(),
+  volume:     integer('volume'),
+});
+```
+
+```bash
+# Generate migration SQL from schema changes
+bun run db:generate    # → src/db/migrations/0001_market_ticks.sql
+
+# Apply to DB
+bun run db:migrate
+```
+
+TimescaleDB-specific DDL (hypertable creation, continuous aggregates) is added as plain SQL in migration files alongside Drizzle-generated statements — Drizzle does not interfere with this.
+
+---
+
+### 7.3 Infrastructure Decisions
+
+#### 7.3.1 Local Development
+
+All local development uses **Docker Compose** (`docker-compose.yml` in project root). This ensures:
+- Every developer has an identical DB + Redis environment
+- CI uses the same Docker images
+- No "works on my machine" database state
+
+Services:
+- `timescale/timescaledb:latest-pg16` — PostgreSQL 16 with TimescaleDB extension pre-installed
+- `redis:7-alpine` — Redis with AOF persistence and 512MB memory cap
+- `dpage/pgadmin4` — optional, gated behind `--profile tools`
+
+#### 7.3.2 Production Infrastructure
+
+| Component | Choice | Rationale |
+|-----------|--------|-----------|
+| **VPS** | Hetzner CX32 (4 vCPU / 8GB) | €14.90/month; ample headroom for trading hours burst |
+| **TimescaleDB** | Timescale Cloud free tier | 10GB storage — sufficient for 1-year 1-min OHLCV; auto-backups; no DBA ops |
+| **Redis** | Self-hosted on VPS | Latency-critical; keeping on same box avoids network hop |
+| **Process manager** | `systemd` | Native Linux; auto-restart, logging to journald |
+| **Reverse proxy** | Caddy | Zero-config auto-HTTPS; simpler than Nginx for this use case |
+
+#### 7.3.3 Secrets Management
+
+| Environment | Approach |
+|-------------|----------|
+| **Local dev** | `.env` file in project root (gitignored). See `.env.example` for all variables. |
+| **CI (GitHub Actions)** | GitHub repository secrets (Settings → Secrets and Variables → Actions). Fyers credentials are **not** stored in CI; integration tests use stub/mock broker clients. |
+| **Production (Hetzner)** | `systemd` service `EnvironmentFile` pointing to `/etc/trade-engine/env`, owned by root, `chmod 600`. Never stored in application code or Docker images. |
+
+**Secret rotation policy:**
+- Fyers access token: auto-refreshed daily by the app via OAuth2
+- `SESSION_SECRET` / `JWT_SECRET`: rotate by updating env + restarting service (invalidates all active sessions — acceptable for this use case)
+- DB password: update in both the env file and Timescale Cloud console; restart service
 
 ---
 
@@ -2203,97 +2283,123 @@ app.register(async (fastify) => {
 });
 ```
 
-### 11.2 Quantiply Integration
+### 11.2 Fyers Integration
+
+**Fyers API v3** is used for both live market data (WebSocket) and paper trade execution. The same credentials serve both — no separate paper trading account is needed; paper mode is toggled via `FYERS_PAPER_TRADING=true`.
+
+**Auth flow:** Fyers uses OAuth2. The access token expires daily and must be refreshed via browser redirect. The app provides a `/auth/fyers/callback` endpoint that stores the refreshed token automatically each trading day.
 
 ```typescript
-interface QuantiplyConfig {
-  apiKey: string;
-  apiSecret: string;
-  baseUrl: string;
+// src/services/broker/fyers-client.ts
+
+interface FyersConfig {
+  appId: string;       // FYERS_APP_ID env var
+  secretKey: string;   // FYERS_SECRET_KEY env var
+  accessToken: string; // FYERS_ACCESS_TOKEN env var (refreshed daily)
   paperTrading: boolean;
 }
 
-class QuantiplyClient {
-  private config: QuantiplyConfig;
+class FyersClient {
+  private readonly baseUrl = 'https://api-t1.fyers.in/api/v3';
   private httpClient: AxiosInstance;
-  
-  constructor(config: QuantiplyConfig) {
-    this.config = config;
+
+  constructor(private config: FyersConfig) {
     this.httpClient = axios.create({
-      baseURL: config.baseUrl,
+      baseURL: this.baseUrl,
       headers: {
-        'X-API-Key': config.apiKey,
-        'Content-Type': 'application/json'
-      }
+        // Fyers auth format: "appId:accessToken"
+        'Authorization': `${config.appId}:${config.accessToken}`,
+        'Content-Type': 'application/json',
+      },
     });
   }
-  
+
   async placeOrder(order: OrderRequest): Promise<OrderResponse> {
-    const endpoint = this.config.paperTrading 
-      ? '/paper/orders' 
-      : '/orders';
-    
-    const response = await this.httpClient.post(endpoint, {
-      tradingsymbol: order.symbol,
-      exchange: 'NFO',
-      transaction_type: order.side,
-      quantity: order.quantity,
-      price: order.price,
-      order_type: order.orderType,
-      product: 'NRML',
-      validity: 'DAY'
+    // Fyers transaction types: 1 = BUY, -1 = SELL
+    const side = order.side === 'BUY' ? 1 : -1;
+
+    const response = await this.httpClient.post('/orders/sync', {
+      symbol: order.symbol,        // e.g. "NSE:NIFTY2541725000CE"
+      qty: order.quantity,
+      type: 2,                     // 1=Limit, 2=Market
+      side,
+      productType: 'INTRADAY',
+      limitPrice: order.price,
+      stopPrice: 0,
+      validity: 'DAY',
+      disclosedQty: 0,
+      offlineOrder: false,
+      // Fyers enables paper trading at account level; this flag is for local safety checks only
+      ...(this.config.paperTrading ? { tag: 'paper' } : {}),
     });
-    
+
+    if (response.data.s !== 'ok') {
+      throw new Error(`Fyers order rejected: ${response.data.message}`);
+    }
+
     return {
-      orderId: response.data.order_id,
-      status: response.data.status,
-      filledQty: response.data.filled_quantity,
-      avgPrice: response.data.average_price
+      orderId: response.data.id,
+      status: 'PLACED',
+      filledQty: response.data.filledQty ?? 0,
+      avgPrice: response.data.tradedPrice ?? order.price,
     };
   }
-  
+
   async getPositions(): Promise<Position[]> {
-    const endpoint = this.config.paperTrading 
-      ? '/paper/positions' 
-      : '/positions';
-    
-    const response = await this.httpClient.get(endpoint);
-    
-    return response.data.positions.map((p: any) => ({
-      symbol: p.tradingsymbol,
-      qty: p.quantity,
-      avgPrice: p.average_price,
+    const response = await this.httpClient.get('/positions');
+
+    return (response.data.netPositions ?? []).map((p: any) => ({
+      symbol: p.symbol,
+      qty: p.netQty,
+      avgPrice: p.netAvg,
       ltp: p.ltp,
-      pnl: p.pnl,
-      side: p.quantity > 0 ? 'LONG' : 'SHORT'
+      pnl: p.pl,
+      side: p.netQty > 0 ? 'LONG' : 'SHORT',
     }));
   }
-  
+
   async modifyOrder(orderId: string, modifications: OrderModification): Promise<void> {
-    const endpoint = this.config.paperTrading 
-      ? `/paper/orders/${orderId}` 
-      : `/orders/${orderId}`;
-    
-    await this.httpClient.put(endpoint, modifications);
-  }
-  
-  async cancelOrder(orderId: string): Promise<void> {
-    const endpoint = this.config.paperTrading 
-      ? `/paper/orders/${orderId}` 
-      : `/orders/${orderId}`;
-    
-    await this.httpClient.delete(endpoint);
-  }
-  
-  async getOptionChain(underlying: string, expiry: Date): Promise<OptionChain> {
-    const response = await this.httpClient.get('/instruments/option-chain', {
-      params: {
-        underlying,
-        expiry: format(expiry, 'yyyy-MM-dd')
-      }
+    await this.httpClient.patch('/orders/sync', {
+      id: orderId,
+      ...modifications,
     });
-    
+  }
+
+  async cancelOrder(orderId: string): Promise<void> {
+    await this.httpClient.delete('/orders/sync', {
+      data: { id: orderId },
+    });
+  }
+
+  async getOptionChain(underlying: string, expiry: Date): Promise<OptionChain> {
+    const response = await this.httpClient.get('/data/options-chain', {
+      params: {
+        symbol: underlying,        // e.g. "NSE:NIFTY-INDEX"
+        strikecount: 10,
+        timestamp: format(expiry, 'yyyy-MM-dd'),
+      },
+    });
+
     return response.data;
+  }
+
+  /** Fetch historical 1-min OHLCV — used by Phase 0 historical ingestion */
+  async getHistory(symbol: string, from: Date, to: Date): Promise<OHLCVBar[]> {
+    const response = await this.httpClient.get('/data/history', {
+      params: {
+        symbol,
+        resolution: '1',           // 1-minute bars
+        date_format: '1',          // epoch timestamps
+        range_from: Math.floor(from.getTime() / 1000),
+        range_to: Math.floor(to.getTime() / 1000),
+        cont_flag: '1',
+      },
+    });
+
+    return (response.data.candles ?? []).map(([t, o, h, l, c, v]: number[]) => ({
+      time: new Date(t * 1000),
+      open: o, high: h, low: l, close: c, volume: v,
+    }));
   }
 }
 ```
@@ -2302,7 +2408,7 @@ class QuantiplyClient {
 
 ```typescript
 interface MarketDataConfig {
-  provider: 'QUANTIPLY' | 'FYERS' | 'ZERODHA';
+  provider: 'FYERS' | 'ZERODHA';  // FYERS is the default; ZERODHA reserved for future
   symbols: string[];
   onTick: (tick: Tick) => void;
   onError: (error: Error) => void;
@@ -2842,14 +2948,16 @@ class Backtester {
 | Prior calibration run (2 years → empirical win rates by regime) | P0 | 4h | Replay engine |
 | Backtest report (entry timing, regime breakdown, per-strategy P&L) | P1 | 4h | Calibration run |
 
-**Deliverable:** TimescaleDB populated with 2–3 years of 1-min ATM straddle data. Agent Bayesian priors calibrated from real history. Initial backtest report validating the 9:17 AM baseline across market regimes.
+**Deliverable:** TimescaleDB populated with ~1 year of 1-min ATM straddle data (Fyers free tier, ~400 trading days). Agent Bayesian priors calibrated from real history. Initial backtest report validating the 9:17 AM baseline across available market regimes.
+
+> **Data depth decision:** We start with **Fyers free API (~1 year)**. The system architecture is built to ingest additional historical data from TrueData or other sources later — simply re-run the ingestion pipeline with a wider `range_from` once purchased. Calibration improves automatically as more data is added.
 
 **Data Required:**
 - 1-min OHLCV: Spot (Nifty/BankNifty/Sensex), ATM CE, ATM PE, OTM1 CE, OTM1 PE per underlying
 - India VIX (1-min or EOD interpolated to 1-min)
-- Coverage target: Jan 2023 – present (Year 1 free via Fyers), Jan 2022 – present (full, via TrueData)
+- Coverage target: ~Jan 2025 – present via Fyers `/data/history` free tier
 
-**Estimated Data Cost:** ₹0 (Fyers, ~1 year) → ₹10,000–₹15,000 one-time (TrueData, 3 years)
+**Estimated Data Cost:** ₹0 (Fyers free tier, ~1 year) — upgradeable to ₹10,000–₹15,000 one-time (TrueData, 3–5 years) when deeper calibration is needed
 
 ---
 
@@ -2860,7 +2968,7 @@ class Backtester {
 | Set up TypeScript + Bun project | P0 | 2h | None |
 | PostgreSQL + TimescaleDB setup | P0 | 4h | None |
 | Redis setup | P0 | 2h | None |
-| Market data feed integration | P0 | 8h | Quantiply API access |
+| Market data feed integration | P0 | 8h | Fyers API credentials + access token |
 | Straddle calculator service | P0 | 4h | Market data feed |
 | ROC engine | P0 | 4h | Straddle calculator |
 | Historical data backfill | P1 | 8h | DB setup |
@@ -2886,7 +2994,7 @@ class Backtester {
 | Personality config schema | P0 | 4h | None |
 | Personality router | P0 | 8h | Signal generator |
 | Default personalities setup | P0 | 4h | Config schema |
-| Paper trade executor | P0 | 12h | Quantiply integration |
+| Paper trade executor | P0 | 12h | Fyers client integration |
 | Position manager | P0 | 8h | Paper trade executor |
 | Risk monitor | P0 | 8h | Position manager |
 
@@ -3037,9 +3145,9 @@ interface HistoricalContractResolver {
 | **Global Datafeeds** | ₹5,000–₹10,000 one-time | 3–5 years | Good | SFTP or API delivery |
 | **Unofficed / NSEPy** | ₹0 | 2–3 years | Mixed | Community scraped, frequent gaps, EOD-heavy |
 
-**Recommended path:**
-1. Start with **Fyers free API** — covers ~1.5 years, enough to validate the system and begin calibration
-2. After initial paper trading validation, purchase **TrueData** for 3-year coverage to deepen prior confidence
+**Decided path:**
+1. **Phase 0:** Use Fyers free API (~1 year / ~400 trading days). Sufficient to calibrate priors and validate signal logic across multiple market regimes.
+2. **Post-validation (optional):** Purchase TrueData (~₹10,000–₹15,000 one-time) for 3–5 year coverage if deeper calibration is warranted. The ingestion pipeline accepts both sources — re-running it with TrueData will populate `historical_ticks` with extended history and trigger automatic prior recalibration.
 
 ### 17.5 Schema Extensions
 
@@ -3391,8 +3499,9 @@ The following backend routes must be implemented to power the dashboard (extends
 
 1. TimescaleDB Documentation: https://docs.timescale.com/
 2. Fastify Documentation: https://www.fastify.io/docs/latest/
-3. Quantiply API Documentation: [Internal]
-4. Options Greeks and Pricing: Hull, J. (2017). Options, Futures, and Other Derivatives
+3. Fyers API v3 Documentation: https://myapi.fyers.in/docs
+4. Drizzle ORM Documentation: https://orm.drizzle.team/docs/overview
+5. Options Greeks and Pricing: Hull, J. (2017). Options, Futures, and Other Derivatives
 
 ### 16.3 Revision History
 
@@ -3401,6 +3510,7 @@ The following backend routes must be implemented to power the dashboard (extends
 | 1.0 | 2024-01-15 | Trading Systems | Initial draft |
 | 1.1 | 2026-03-24 | Trading Systems | Added Capital Allocation Model (Section 2.4): 6-lot split into Tranche 1 (3-lot baseline at 9:17, agent-evolvable) and Tranche 2 (agent reserve). Added Baseline Deployment Algorithm (Section 8.3). Added H6 to core hypotheses. Added baseline evolution rules to Retrospection Engine. |
 | 1.2 | 2026-03-24 | Trading Systems | Added Phase 0 (Historical Data & Backtest Calibration) to Implementation Roadmap. Shifted Phase 1–6 week numbers by 2 weeks (now 14-week roadmap). Added Section 17 (Historical Data Architecture & Backtest Replay): contract symbol resolution, schema extensions, replay engine, prior calibration workflow. Added Section 18 (Analytics Dashboard Specification): 7 dashboard pages with full component specs, API endpoint list, and frontend tech stack. Updated ToC. |
+| 1.3 | 2026-03-24 | Trading Systems | Locked pre-development decisions: (1) Broker/data → Fyers API v3 (replaces Quantiply throughout); (2) Historical data → Fyers free tier ~1 year to start, TrueData upgrade path preserved; (3) Local dev → Docker Compose (TimescaleDB + Redis); (4) Prod DB → Timescale Cloud free tier; (5) Migrations → Drizzle ORM (added Section 7.2.6); (6) Secrets → .env/GitHub Secrets/systemd EnvironmentFile (added Section 7.3); (7) CI → GitHub Actions 4-job pipeline. Added operational artifacts: `.env.example`, `docker-compose.yml`, `DEVELOPMENT_SETUP.md`, `.github/workflows/ci.yml`. |
 
 ---
 
