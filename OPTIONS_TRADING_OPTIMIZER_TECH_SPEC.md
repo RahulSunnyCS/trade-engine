@@ -27,6 +27,8 @@
 14. [Implementation Roadmap](#14-implementation-roadmap)
 15. [Success Metrics](#15-success-metrics)
 16. [Appendix](#16-appendix)
+17. [Historical Data Architecture & Backtest Replay](#17-historical-data-architecture--backtest-replay)
+18. [Analytics Dashboard Specification](#18-analytics-dashboard-specification)
 
 ---
 
@@ -147,6 +149,59 @@ Weekly index options traders face a fundamental timing problem:
 
 ---
 
+### 2.4 Capital Allocation Model
+
+Every trader operates with capital sufficient for **6 lots** total. This capacity is split into two tranches:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     CAPITAL ALLOCATION MODEL                            │
+├──────────────────────────────┬──────────────────────────────────────────┤
+│   TRANCHE 1 — Baseline       │   TRANCHE 2 — Agent Reserve             │
+│   3 lots                     │   3 lots                                 │
+│                              │                                          │
+│   • Deployed at 9:17 AM      │   • Held back initially                  │
+│   • All 3 strategies run     │   • Agents decide when/how to deploy    │
+│   • Day 1 default, no        │   • 0 to 3 lots, any time               │
+│     conditions required      │   • Can also modify Tranche 1           │
+│                              │                                          │
+│   Evolves over time based    │   Optimized via Retrospection Engine     │
+│   on agent rule output       │   from day 1 data onwards               │
+└──────────────────────────────┴──────────────────────────────────────────┘
+```
+
+#### Tranche 1 — Baseline Deployment
+
+- **Day 1 behaviour:** Deploy all 3 strategies using 3 lots at 9:17 AM, unconditionally. This is the starting prior — a sensible human default that gives the system live data from the first trading session.
+- **Evolves from Day 2 onwards:** Rule-based agents observe outcomes from Tranche 1 and can adjust:
+  - Entry time (e.g. shift from 9:17 → 9:24)
+  - Lot count (e.g. reduce to 2 lots on high-VIX days)
+  - Which strategies to include
+  - Whether to skip entirely (circuit breaker conditions)
+- **Override triggers** (minimum evidence required before agents can adjust baseline):
+  - At least **10 trading sessions** of data for time-shift decisions
+  - At least **3 consecutive losing days** to trigger lot reduction
+  - Statistically significant p-value (< 0.05) from Retrospection Engine for strategy removal
+
+#### Tranche 2 — Agent Reserve
+
+- Held in reserve each morning.
+- Retrospection Engine governs deployment: entry time, lot count (0–3), strategy selection.
+- Can also instruct Tranche 1 adjustments (e.g. early exit, hedge addition).
+- On **Day 1**, reserve stays undeployed — agents have no data yet to act on.
+
+#### Why This Split Works
+
+| Concern | Resolution |
+|---------|------------|
+| Cold-start problem | Tranche 1 generates live data from Day 1 |
+| RL/agents need baseline to compare against | Tranche 1 is the consistent control group |
+| Risk of over-trading | Total exposure always capped at 6 lots |
+| Risk of under-trading | Tranche 1 guarantees minimum market participation |
+| Interpretability | Rule-based agent adjustments are explainable |
+
+---
+
 ## 3. Core Hypothesis
 
 ### 3.1 Primary Hypothesis
@@ -162,6 +217,7 @@ Weekly index options traders face a fundamental timing problem:
 | H3 | Conservative personalities outperform in low-VIX regimes | Win rate differential > 15% when India VIX < 14 |
 | H4 | Time-staggered entries reduce variance | 10-min delayed entries have lower drawdown than immediate entries |
 | H5 | Profit-gated trading improves risk-adjusted returns | Skipping trades after losing streaks improves Sharpe by >0.3 |
+| H6 | Baseline 9:17 entry (Tranche 1) provides a statistically measurable starting prior | After 20 sessions, Tranche 1 win rate deviates from 50% with p < 0.05, giving agents a calibration anchor |
 
 ### 3.3 Falsification Criteria
 
@@ -1200,7 +1256,130 @@ class BayesianProbabilityModel {
 }
 ```
 
-### 8.3 Time-Staggered Entry Analysis
+### 8.3 Baseline Deployment Algorithm
+
+This algorithm governs Tranche 1 — the default 3-lot deployment that runs from Day 1 and evolves via rule-based agent decisions.
+
+#### Day 1 Behaviour (Cold Start)
+
+```typescript
+interface BaselineConfig {
+  entryTime: string;              // Default: '09:17'
+  lots: number;                   // Default: 3
+  strategies: StrategyType[];     // Default: all 3 strategies
+  isActive: boolean;              // Default: true
+  version: number;
+  lastModifiedReason: string | null;
+}
+
+const BASELINE_DEFAULT: BaselineConfig = {
+  entryTime: '09:17',
+  lots: 3,
+  strategies: ['NON_DIRECTIONAL', 'DIRECTIONAL', 'MOMENTUM_BUY'],
+  isActive: true,
+  version: 1,
+  lastModifiedReason: null
+};
+```
+
+On Day 1, `BASELINE_DEFAULT` is used without any conditions. No signal check, no regime filter — just deploy.
+
+#### Agent Evolution (Day 2 Onwards)
+
+Agents evaluate baseline performance each EOD and propose adjustments. A proposal is only applied if it clears the minimum evidence threshold:
+
+```typescript
+interface BaselineEvolutionProposal {
+  proposedConfig: Partial<BaselineConfig>;
+  triggerRule: string;
+  evidenceSessions: number;     // How many sessions of data support this
+  pValue: number | null;        // Statistical significance where applicable
+  requiresReview: boolean;      // Always true for lot changes
+}
+
+const BASELINE_EVOLUTION_RULES = [
+  {
+    name: 'ShiftEntryTimeOnPersistentLoss',
+    // Shift entry time if 9:17 entry consistently underperforms later entries
+    trigger: (m: BaselineMetrics) =>
+      m.sessions >= 10 &&
+      m.avgPnLAt917 < m.avgPnLAt924 * 0.8, // 9:17 returns 20% worse than 9:24
+    action: (config: BaselineConfig): Partial<BaselineConfig> => ({
+      entryTime: '09:24',
+      lastModifiedReason: 'Agent: 9:17 entry underperforming 9:24 by >20% over 10+ sessions'
+    }),
+    minSessions: 10,
+    cooldownDays: 14
+  },
+
+  {
+    name: 'ReduceLotsOnConsecutiveLoss',
+    // Reduce to 2 lots after 3 consecutive losing days on Tranche 1
+    trigger: (m: BaselineMetrics) =>
+      m.consecutiveLossDays >= 3,
+    action: (config: BaselineConfig): Partial<BaselineConfig> => ({
+      lots: Math.max(config.lots - 1, 1),
+      lastModifiedReason: 'Agent: 3 consecutive losing days on baseline'
+    }),
+    minSessions: 3,
+    cooldownDays: 7
+  },
+
+  {
+    name: 'DropUnderperformingStrategy',
+    // Remove a strategy from baseline if it has statistically significant negative contribution
+    trigger: (m: BaselineMetrics) =>
+      m.sessions >= 20 &&
+      m.worstStrategyPValue < 0.05 &&
+      m.worstStrategyAvgPnL < 0,
+    action: (config: BaselineConfig, worstStrategy: StrategyType): Partial<BaselineConfig> => ({
+      strategies: config.strategies.filter(s => s !== worstStrategy),
+      lastModifiedReason: `Agent: ${worstStrategy} statistically negative (p < 0.05) over 20+ sessions`
+    }),
+    minSessions: 20,
+    cooldownDays: 30
+  },
+
+  {
+    name: 'RestoreBaselineAfterRecovery',
+    // Restore lots/strategies if performance recovers
+    trigger: (m: BaselineMetrics) =>
+      m.lots < 3 &&
+      m.winRate10d >= 0.55 &&
+      m.sessions >= 10,
+    action: (): Partial<BaselineConfig> => ({
+      lots: 3,
+      lastModifiedReason: 'Agent: Performance recovered, restoring baseline lots'
+    }),
+    minSessions: 10,
+    cooldownDays: 7
+  }
+];
+```
+
+#### Baseline State Tracking (DB)
+
+```sql
+CREATE TABLE baseline_config_history (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    effective_date      DATE NOT NULL,
+    entry_time          VARCHAR(5) NOT NULL DEFAULT '09:17',
+    lots                INTEGER NOT NULL DEFAULT 3,
+    strategies          TEXT[] NOT NULL,
+    is_active           BOOLEAN NOT NULL DEFAULT TRUE,
+    version             INTEGER NOT NULL DEFAULT 1,
+    change_reason       TEXT,
+    proposed_by         VARCHAR(50),   -- 'AGENT' or 'MANUAL'
+    reviewed_by         VARCHAR(50),   -- Human reviewer
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Always insert, never update — full audit trail of baseline evolution
+```
+
+---
+
+### 8.4 Time-Staggered Entry Analysis
 
 For each signal, we simulate entries at multiple time offsets:
 
@@ -1872,6 +2051,31 @@ const EVOLUTION_RULES: EvolutionRule[] = [
       evolutionReason: 'Auto: High P&L variance'
     }),
     cooldownDays: 30,
+    requiresReview: true
+  },
+
+  // ---- Baseline (Tranche 1) Evolution Rules ----
+  {
+    name: 'BaselineShiftEntryTime',
+    trigger: (m) => m.isBaselineRule &&
+      m.sessions >= 10 &&
+      m.baselineAvgPnLAt917 < m.baselineAvgPnLAt924 * 0.8,
+    action: (config) => ({
+      ...config,
+      evolutionReason: 'Auto: Baseline 9:17 entry underperforming 9:24 over 10+ sessions'
+    }),
+    cooldownDays: 14,
+    requiresReview: true
+  },
+
+  {
+    name: 'BaselineReduceLotsOnLoss',
+    trigger: (m) => m.isBaselineRule && m.consecutiveLossDays >= 3,
+    action: (config) => ({
+      ...config,
+      evolutionReason: 'Auto: Baseline 3 consecutive losing days — reduce lots'
+    }),
+    cooldownDays: 7,
     requiresReview: true
   }
 ];
@@ -2624,7 +2828,32 @@ class Backtester {
 
 ## 14. Implementation Roadmap
 
-### Phase 1: Foundation (Weeks 1-2)
+### Phase 0: Historical Data & Backtest Calibration (Weeks 1-2)
+
+> **Purpose:** Acquire 2–3 years of historical ATM straddle data, build a backtest replay engine, and calibrate agent priors before paper trading begins. Agents start with evidence-based probability estimates rather than hand-coded guesses.
+
+| Task | Priority | Effort | Dependencies |
+|------|----------|--------|--------------|
+| Historical data source evaluation (Fyers API) | P0 | 4h | Broker account |
+| Contract symbol resolver (map expiry tokens historically) | P0 | 8h | Fyers API access |
+| Historical ingestion pipeline (ATM CE/PE/spot/VIX, 1-min) | P0 | 12h | Symbol resolver + DB |
+| Data validation & gap detection | P1 | 4h | Ingestion pipeline |
+| Backtest replay engine (simulation mode, zero look-ahead) | P0 | 16h | Historical data + pipeline |
+| Prior calibration run (2 years → empirical win rates by regime) | P0 | 4h | Replay engine |
+| Backtest report (entry timing, regime breakdown, per-strategy P&L) | P1 | 4h | Calibration run |
+
+**Deliverable:** TimescaleDB populated with 2–3 years of 1-min ATM straddle data. Agent Bayesian priors calibrated from real history. Initial backtest report validating the 9:17 AM baseline across market regimes.
+
+**Data Required:**
+- 1-min OHLCV: Spot (Nifty/BankNifty/Sensex), ATM CE, ATM PE, OTM1 CE, OTM1 PE per underlying
+- India VIX (1-min or EOD interpolated to 1-min)
+- Coverage target: Jan 2023 – present (Year 1 free via Fyers), Jan 2022 – present (full, via TrueData)
+
+**Estimated Data Cost:** ₹0 (Fyers, ~1 year) → ₹10,000–₹15,000 one-time (TrueData, 3 years)
+
+---
+
+### Phase 1: Foundation (Weeks 3-4)
 
 | Task | Priority | Effort | Dependencies |
 |------|----------|--------|--------------|
@@ -2638,7 +2867,7 @@ class Backtester {
 
 **Deliverable:** Real-time straddle tracking with historical storage
 
-### Phase 2: Signal Engine (Weeks 3-4)
+### Phase 2: Signal Engine (Weeks 5-6)
 
 | Task | Priority | Effort | Dependencies |
 |------|----------|--------|--------------|
@@ -2650,7 +2879,7 @@ class Backtester {
 
 **Deliverable:** Signals generated and stored, visible via API
 
-### Phase 3: Personality System (Weeks 5-6)
+### Phase 3: Personality System (Weeks 7-8)
 
 | Task | Priority | Effort | Dependencies |
 |------|----------|--------|--------------|
@@ -2663,7 +2892,7 @@ class Backtester {
 
 **Deliverable:** Multiple personalities paper trading in parallel
 
-### Phase 4: Retrospection (Weeks 7-8)
+### Phase 4: Retrospection (Weeks 9-10)
 
 | Task | Priority | Effort | Dependencies |
 |------|----------|--------|--------------|
@@ -2675,20 +2904,25 @@ class Backtester {
 
 **Deliverable:** Daily retrospection reports with evolution candidates
 
-### Phase 5: Dashboard (Weeks 9-10)
+### Phase 5: Dashboard & Analytics (Weeks 11-12)
 
 | Task | Priority | Effort | Dependencies |
 |------|----------|--------|--------------|
-| React project setup | P0 | 2h | None |
-| Real-time straddle chart | P0 | 8h | WebSocket + Charts |
-| Personality dashboard | P0 | 8h | Personality API |
-| Trade log view | P1 | 4h | Trade API |
-| Retrospection viewer | P1 | 4h | Retrospection API |
+| React project setup (Vite + Tailwind + Zustand) | P0 | 2h | None |
+| WebSocket client + real-time state management | P0 | 4h | Backend WS |
+| Overview page — live system status, today's P&L by personality | P0 | 6h | Personality API |
+| Agent Performance page — per-personality analytics (win rate, Sharpe, drawdown, entry time heatmap) | P0 | 12h | Trade history API |
+| Backtest Explorer page — replay results, entry timing analysis, regime breakdown | P0 | 8h | Backtest API |
+| Live Trading page — real-time OHLCV chart with signal markers, active positions | P0 | 8h | WebSocket |
+| Trade Log page — sortable/filterable table of all paper trades | P1 | 4h | Trade API |
+| Retrospection Feed page — EOD reports, parameter change timeline | P1 | 4h | Retrospection API |
+| Prior Evolution chart — agent prior drift over time as market evidence accumulates | P1 | 6h | Bayesian state API |
+| Signal Analytics page — accuracy, false positive rate, ROC threshold analysis, regime heatmap | P1 | 6h | Signal history API |
 | Alerts integration (Telegram) | P2 | 4h | Signal generator |
 
-**Deliverable:** Operational dashboard for monitoring
+**Deliverable:** Full analytics dashboard for monitoring agent performance, backtest results, prior calibration state, and live paper trading activity in real-time. See Section 18 for detailed component specs.
 
-### Phase 6: Validation (Weeks 11-12)
+### Phase 6: Validation (Weeks 13-14)
 
 | Task | Priority | Effort | Dependencies |
 |------|----------|--------|--------------|
@@ -2732,6 +2966,412 @@ class Backtester {
 
 ---
 
+## 17. Historical Data Architecture & Backtest Replay
+
+### 17.1 Why Historical Data Before Paper Trading
+
+The system's Bayesian probability model starts with hand-coded priors:
+
+```typescript
+this.priors.set('LOW_VOL', { baseProbability: 0.60, sampleSize: 50 ... })
+```
+
+`0.60` is a guess. With 2 years of historical ATM straddle data, that number becomes real — derived from actual market behaviour. Running Phase 0 before live paper trading means:
+
+- Agents start **calibrated**, not learning from scratch over 3 months
+- The 9:17 AM baseline entry is **validated against known history** before any capital is committed (even paper)
+- Evolution rules (shift entry, reduce lots, drop strategy) can be **back-tested before trusting them**
+- The "blind period" of paper trading before agents converge is significantly compressed
+
+### 17.2 Data Requirements
+
+The system cares only about ATM straddles — not the full option chain. For each historical trading day this means:
+
+```
+Per underlying (Nifty / BankNifty / Sensex), per trading day:
+  ├── Spot price (1-min OHLCV)          → derive ATM strike
+  ├── ATM CE (1-min OHLCV)              → straddle leg 1
+  ├── ATM PE (1-min OHLCV)              → straddle leg 2
+  ├── OTM1 CE + OTM1 PE (1-min OHLCV)  → Strategy 1 contracts
+  └── India VIX (1-min or EOD interp.) → regime classifier
+
+≈ 5–7 contracts per underlying per day
+≈ 1,500–2,100 contracts total across 3 years of trading days (Nifty only)
+```
+
+This is manageable — not the full chain (which would be thousands of strikes/day).
+
+### 17.3 The Contract Resolution Problem
+
+Option symbols change every week with expiry. To reconstruct ATM straddle history you must:
+
+1. For each historical minute, look up what the spot price was
+2. Derive the ATM strike (`round(spot / strikeInterval) × strikeInterval`)
+3. Identify which contract was the ATM for that expiry week
+4. Fetch 1-min OHLCV for that specific token
+
+```typescript
+interface HistoricalContractResolver {
+  // Given a timestamp + underlying, return the ATM contract symbol
+  resolveATMContract(
+    underlying: Underlying,
+    timestamp: Date,
+    optionType: 'CE' | 'PE',
+    strikeOffset: 0 | 1 | -1   // 0=ATM, 1=OTM1 above, -1=OTM1 below
+  ): ContractSymbol;
+
+  // Weekly expiry calendar (Thursday for Nifty/BankNifty, Friday for Sensex)
+  getExpiryForDate(underlying: Underlying, date: Date): Date;
+
+  // Nearest valid strike (Nifty: 50pt, BankNifty: 100pt, Sensex: 100pt)
+  calculateATMStrike(spotPrice: number, underlying: Underlying): number;
+}
+```
+
+### 17.4 Data Sources
+
+| Source | Cost | Coverage | Quality | Access Method |
+|--------|------|----------|---------|---------------|
+| **Fyers API** | ₹0 | ~400 trading days (~1.5 years) | Good | `/data/history` REST endpoint, 1-min OHLCV, F&O included |
+| **TrueData** | ₹10,000–₹15,000 one-time | 5+ years | Excellent | REST API or SFTP, 1-min OHLCV, clean corporate actions |
+| **Global Datafeeds** | ₹5,000–₹10,000 one-time | 3–5 years | Good | SFTP or API delivery |
+| **Unofficed / NSEPy** | ₹0 | 2–3 years | Mixed | Community scraped, frequent gaps, EOD-heavy |
+
+**Recommended path:**
+1. Start with **Fyers free API** — covers ~1.5 years, enough to validate the system and begin calibration
+2. After initial paper trading validation, purchase **TrueData** for 3-year coverage to deepen prior confidence
+
+### 17.5 Schema Extensions
+
+The following tables extend the core schema (Section 6) for historical data and backtesting:
+
+```sql
+-- Option contract master (historical token registry)
+CREATE TABLE option_contracts (
+  id            SERIAL PRIMARY KEY,
+  underlying    VARCHAR(20) NOT NULL,
+  symbol        VARCHAR(60) NOT NULL UNIQUE,
+  strike        INTEGER NOT NULL,
+  option_type   CHAR(2) NOT NULL,        -- CE / PE
+  expiry_date   DATE NOT NULL,
+  lot_size      INTEGER NOT NULL,
+  source        VARCHAR(30),             -- 'fyers' | 'truedata' | 'global_datafeeds'
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Historical 1-min OHLCV (separate hypertable from live market_ticks)
+CREATE TABLE historical_ticks (
+  time          TIMESTAMPTZ NOT NULL,
+  underlying    VARCHAR(20) NOT NULL,
+  contract_id   INTEGER REFERENCES option_contracts(id),
+  open          NUMERIC(10,2),
+  high          NUMERIC(10,2),
+  low           NUMERIC(10,2),
+  close         NUMERIC(10,2),
+  volume        INTEGER,
+  oi            INTEGER
+);
+SELECT create_hypertable('historical_ticks', 'time');
+CREATE INDEX ON historical_ticks (contract_id, time DESC);
+
+-- Backtest run metadata
+CREATE TABLE backtest_runs (
+  id                 SERIAL PRIMARY KEY,
+  run_name           VARCHAR(100),
+  start_date         DATE NOT NULL,
+  end_date           DATE NOT NULL,
+  personality_config JSONB NOT NULL,
+  slippage_model     VARCHAR(20) DEFAULT 'halfSpread',
+  results_summary    JSONB,              -- Aggregate stats
+  calibration_output JSONB,             -- Updated priors (if calibration=true)
+  created_at         TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Individual backtest trades
+CREATE TABLE backtest_trades (
+  id              SERIAL PRIMARY KEY,
+  backtest_id     INTEGER REFERENCES backtest_runs(id),
+  trade_date      DATE NOT NULL,
+  personality     VARCHAR(50),
+  strategy        VARCHAR(50),
+  underlying      VARCHAR(20),
+  entry_time      TIMESTAMPTZ NOT NULL,
+  exit_time       TIMESTAMPTZ,
+  entry_price     NUMERIC(10,2),
+  exit_price      NUMERIC(10,2),
+  lots            INTEGER,
+  pnl             NUMERIC(10,2),
+  exit_reason     VARCHAR(50),          -- 'stoploss' | 'target' | 'eod' | 'trailing_sl'
+  market_regime   VARCHAR(20),
+  signal_prob     NUMERIC(5,4),         -- Probability score at entry
+  vix_at_entry    NUMERIC(6,2)
+);
+```
+
+### 17.6 Replay Engine Design
+
+The replay engine feeds historical data through the **exact same signal pipeline used in live trading** — the signal generator and personality router are not aware they are in backtest mode. Only the data feed and trade executor differ.
+
+```
+HistoricalDataFeed (replays 1-min bars as synthetic ticks)
+  │
+  ▼
+[Tick Processor] → [Straddle Calculator] → [ROC Engine]
+  │
+  ▼
+[Signal Generator] → [Personality Router]
+  │                         │
+  │                         ▼
+  │               [BacktestTradeExecutor]     ← fills at bar close, not live API
+  │                         │
+  │                         ▼
+  │                   [backtest_trades table]
+  │
+  ▼
+[EOD Retrospection Engine]  ← runs identically to live retrospection
+  │
+  ▼
+[Prior Calibration Update]  ← writes calibrated priors to personality_configs
+```
+
+**Zero look-ahead guarantee:** The `HistoricalDataFeed` delivers data one 1-min bar at a time in chronological order. No future bars are accessible to any component during replay.
+
+```typescript
+interface BacktestConfig {
+  startDate: Date;
+  endDate: Date;
+  personalities: PersonalityConfig[];
+  slippageModel: 'zero' | 'halfSpread' | 'custom';
+  fillMode: 'atClose' | 'atOpen';   // atClose = conservative default
+  runCalibration: boolean;          // write updated priors after run?
+}
+
+interface BacktestResult {
+  runId: string;
+  totalTrades: number;
+  winRate: number;
+  totalPnL: number;
+  sharpeRatio: number;
+  maxDrawdown: number;
+  byPersonality: PersonalityBacktestResult[];
+  byRegime: RegimeBreakdown[];
+  byEntryTimeBucket: EntryTimeBucket[];  // 9:15, 9:17, 9:20, 9:25, 9:30+
+  byYear: YearlyBreakdown[];
+  calibratedPriors?: CalibratedPriors;  // populated if runCalibration=true
+}
+```
+
+### 17.7 Prior Calibration Workflow
+
+After a backtest run, the calibration step replaces hand-coded prior estimates with empirical win rates:
+
+```
+Backtest trades (2–3 years)
+  → Group by regime         (LOW_VOL, TRENDING_UP, TRENDING_DOWN, HIGH_VOL, GAP)
+  → Group by entry time     (9:15–9:17, 9:17–9:20, 9:20–9:25, 9:25–9:30, 9:30+)
+  → Group by VIX level      (<12, 12–16, 16–20, >20)
+  → Calculate empirical win rate per bucket (wins / total trades)
+  → Update baseProbability priors
+  → Store as calibrated_priors JSON in personality_configs
+```
+
+**Before calibration (guessed):**
+```typescript
+this.priors.set('LOW_VOL', { baseProbability: 0.60, sampleSize: 50 })
+```
+
+**After Phase 0 calibration (evidence-based from 2 years of real data):**
+```typescript
+this.priors.set('LOW_VOL', { baseProbability: 0.63, sampleSize: 847 })
+//                                              ^^^^              ^^^
+//                            real win rate from history     847 actual trades
+```
+
+The `sampleSize` also governs how quickly live paper trading evidence overrides the historical prior — a larger sample from history means more stability before live data dominates.
+
+---
+
+## 18. Analytics Dashboard Specification
+
+### 18.1 Overview
+
+The React dashboard gives you a single pane of glass across three data sources: live paper trading, historical backtest results, and agent evolution state. Designed for **daily monitoring** during paper trading and **deep analysis** during retrospection.
+
+### 18.2 Pages & Routes
+
+| Route | Page | Primary Use |
+|-------|------|-------------|
+| `/` | **Overview** | Morning health check, today's P&L, live regime |
+| `/agents` | **Agent Performance** | Ongoing analytics per personality |
+| `/backtest` | **Backtest Explorer** | Replay results, entry timing, calibration output |
+| `/live` | **Live Trading** | Real-time straddle chart, signal feed, open positions |
+| `/trades` | **Trade Log** | Full filterable history of all paper trades |
+| `/retrospection` | **Retrospection Feed** | EOD reports, parameter change timeline |
+| `/signals` | **Signal Analytics** | Signal accuracy, false positive rates, regime heatmap |
+
+### 18.3 Overview Page (`/`)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  TRADE ENGINE                                        2026-03-24  9:32:14 AM │
+├──────────────┬──────────────┬───────────────┬──────────────────────────────┤
+│  SYSTEM      │  TODAY'S P&L │  SIGNALS      │  MARKET                      │
+│  ● Online    │  +₹2,340     │  3 generated  │  Nifty: 22,450 (+0.8%)        │
+│  Latency 34ms│  (3 trades)  │  2 acted on   │  VIX: 14.2 ↓  Regime: LOW_VOL│
+└──────────────┴──────────────┴───────────────┴──────────────────────────────┘
+│                                                                               │
+│  PERSONALITY P&L TODAY                   ROLLING 30-DAY CUMULATIVE P&L       │
+│  ┌────────────────────────────────────┐  ┌────────────────────────────────┐  │
+│  │  Conservative  +₹540  (1 trade)    │  │  [Line chart: C / B / A]       │  │
+│  │  Balanced      +₹1,100 (1 trade)   │  │   date range selector          │  │
+│  │  Aggressive    +₹700  (1 trade)    │  │                                │  │
+│  └────────────────────────────────────┘  └────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Components:**
+- System health indicator (online/offline, WebSocket latency, last tick timestamp)
+- Live market strip (Nifty/BankNifty/Sensex spot + % change, VIX, regime classification)
+- Today's P&L card per personality (live, updates via WebSocket)
+- 30-day rolling cumulative P&L line chart (one line per personality)
+- Open positions table (if any positions active right now)
+
+### 18.4 Agent Performance Page (`/agents`)
+
+The deepest view into how each personality is performing over time.
+
+**Summary cards (one row per personality):**
+
+| Metric | Description |
+|--------|-------------|
+| Win Rate | Current win rate with 95% confidence interval |
+| Sharpe Ratio | Rolling 30-day, annualised |
+| Total Paper P&L | Cumulative since system start |
+| Avg P&L / Trade | Mean trade outcome in ₹ |
+| Trades Today / Total | Activity counter |
+
+**Charts:**
+
+- **Cumulative P&L over time** — multi-line chart, one per personality, date range selector (1W / 1M / 3M / All)
+- **Win Rate by Market Regime** — grouped bar chart (Conservative / Balanced / Aggressive per regime: LOW_VOL / TRENDING / HIGH_VOL / GAP)
+- **Entry Time Heatmap** — 2D grid: time of day (x-axis, 9:15–10:30, 5-min buckets) × P&L outcome (color: green→red), reveals empirically best entry windows per personality
+- **P&L Distribution** — histogram of per-trade P&L outcomes, shows distribution shape (tight = consistent; fat tails = volatile)
+- **Drawdown Chart** — rolling max drawdown over time per personality
+- **Prior Evolution** — line chart showing how `baseProbability` for each regime drifted as evidence accumulated (x=date, y=probability, one line per regime)
+
+**Trade table (last 50 trades, filterable by personality/strategy/regime):**
+
+| Column | Description |
+|--------|-------------|
+| Date | Trade date |
+| Personality | Conservative / Balanced / Aggressive |
+| Strategy | 1 / 2 / 3 |
+| Entry Time | HH:MM |
+| Entry Price | Straddle premium at entry |
+| Exit Price | Straddle premium at exit |
+| P&L (₹) | Net P&L |
+| Exit Reason | SL / Target / EOD / TSL |
+| Regime | Market regime at entry |
+| Signal Prob | Probability score that triggered entry |
+
+### 18.5 Backtest Explorer Page (`/backtest`)
+
+Review historical replay results and see how the calibration changed agent priors.
+
+**Components:**
+- **Run selector dropdown** — list all historical backtest runs with date, name, and total P&L preview
+- **Date range performance** — calendar heatmap (green/red per trading day by P&L), reveals patterns in losing months
+- **Entry Timing Analysis** — bar chart: average P&L by entry delay bucket (0 min / 5 min / 10 min / 15 min / 20 min+ after open) — this directly answers the core research question
+- **Regime Distribution** — pie chart: what % of trades occurred in each regime; bar chart: win rate per regime
+- **Strategy Comparison** — Strategy 1 vs 2 vs 3: win rate, avg P&L, Sharpe side-by-side
+- **Prior Calibration Table** — shows pre-calibration guess vs post-calibration empirical prior, with observation count per bucket
+
+```
+PRIOR CALIBRATION OUTPUT — Run: "2023-2024 Full Backtest"
+
+Regime          Pre-Cal Prob  Post-Cal Prob  Observations  Δ
+─────────────────────────────────────────────────────────────
+LOW_VOL         0.60          0.63           847           +3%
+TRENDING_UP     0.55          0.48           312           -7%  ← worse than expected
+TRENDING_DOWN   0.55          0.51           289           -4%
+HIGH_VOL        0.40          0.37           156           -3%
+GAP_UP          0.45          0.42           98            -3%
+GAP_DOWN        0.45          0.44           87            -1%
+```
+
+### 18.6 Live Trading Page (`/live`)
+
+Real-time market monitoring during market hours (9:15 AM – 3:30 PM).
+
+**Components:**
+- **Straddle OHLCV Chart** (TradingView Lightweight Charts):
+  - 1-min candlestick chart of ATM straddle value
+  - Signal markers overlaid (↑ = signal fired, ✓ = trade entered, ✗ = SL hit)
+  - ROC indicator panel below main chart (1-min and 5-min ROC lines)
+  - VIX mini-strip in header
+- **Active Positions Table** — live mark-to-market P&L, current premium vs entry premium, distance to stop-loss
+- **Signal Feed** — chronological list of signals generated today (time, personality, probability, acted / not acted, reason)
+- **Regime indicator** — current market regime badge with confidence level
+
+### 18.7 Signal Analytics Page (`/signals`)
+
+Evaluates whether the peak detection algorithm is actually finding peaks.
+
+**Components:**
+- **Signal Accuracy over time** — rolling 30-day accuracy (% of signals where the straddle did actually reverse after entry); date range filterable
+- **False Positive Rate** — signals that fired but no momentum exhaustion occurred (straddle continued expanding after entry, hit SL)
+- **Regime Heatmap** — signal count and accuracy by regime × time-of-day bucket (2D color grid)
+- **ROC Threshold Sensitivity** — shows how shifting the ROC deceleration threshold (±10%, ±20%) changes accuracy vs trade frequency — helps tune the algorithm
+- **Signal Probability Calibration** — scatter: predicted probability vs actual win rate per bucket (well-calibrated = points on diagonal)
+
+### 18.8 Retrospection Feed (`/retrospection`)
+
+Chronological log of EOD retrospection runs and the parameter changes they proposed.
+
+**Components:**
+- **Feed cards** — one per EOD run: date, summary finding (e.g. "Balanced: 3 consecutive losses in TRENDING regime, reduce probability threshold by 5%"), proposed changes, approval status (Pending / Approved / Rejected)
+- **Parameter Timeline** — multi-line chart showing how each personality's key parameters changed over time:
+  - Probability threshold (e.g. Conservative: 0.75 → 0.77 → 0.74...)
+  - Entry delay (e.g. Balanced: 2min → 3min → 2min...)
+  - Max lots (e.g. Aggressive: 4 → 3 → 4...)
+- **Approval workflow** — click any proposed change to approve or reject (requires explicit confirmation before parameter is applied)
+
+### 18.9 Frontend Tech Stack
+
+| Layer | Library | Purpose |
+|-------|---------|---------|
+| Framework | React 18 + Vite | Component rendering, fast HMR |
+| State | Zustand | Global state, WebSocket subscription |
+| OHLCV Charts | Lightweight Charts (TradingView) | Real-time candlestick + signal markers |
+| Analytics Charts | Recharts | Bar, line, pie, heatmap, histogram |
+| Tables | TanStack Table v8 | Sortable, filterable trade log |
+| Styling | Tailwind CSS + shadcn/ui | Rapid UI with accessible design system |
+| Date handling | date-fns | Market session calculations, time bucketing |
+| Real-time | WebSocket (native browser API) | Live ticks, position updates, signal feed |
+| Icons | Lucide React | Consistent icon set |
+
+### 18.10 API Endpoints Required for Dashboard
+
+The following backend routes must be implemented to power the dashboard (extends Section 11):
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/api/system/status` | GET | Health, latency, last tick time |
+| `/api/market/snapshot` | GET | Current spot, VIX, regime |
+| `/api/personalities/summary` | GET | All personality stats (P&L, win rate, Sharpe) |
+| `/api/personalities/:name/trades` | GET | Trade history for one personality |
+| `/api/personalities/:name/priors` | GET | Prior evolution time series |
+| `/api/signals/feed` | GET | Recent signals with outcomes |
+| `/api/signals/analytics` | GET | Accuracy, FPR, regime breakdown |
+| `/api/backtest/runs` | GET | List all backtest run metadata |
+| `/api/backtest/:runId/results` | GET | Full results for one run |
+| `/api/backtest/:runId/calibration` | GET | Prior calibration output for run |
+| `/api/retrospection/feed` | GET | Recent EOD run cards |
+| `/api/retrospection/:id/approve` | POST | Approve a parameter change |
+| `/ws/live` | WebSocket | Real-time ticks, positions, signals |
+
+---
+
 ## 16. Appendix
 
 ### 16.1 Glossary
@@ -2759,6 +3399,8 @@ class Backtester {
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2024-01-15 | Trading Systems | Initial draft |
+| 1.1 | 2026-03-24 | Trading Systems | Added Capital Allocation Model (Section 2.4): 6-lot split into Tranche 1 (3-lot baseline at 9:17, agent-evolvable) and Tranche 2 (agent reserve). Added Baseline Deployment Algorithm (Section 8.3). Added H6 to core hypotheses. Added baseline evolution rules to Retrospection Engine. |
+| 1.2 | 2026-03-24 | Trading Systems | Added Phase 0 (Historical Data & Backtest Calibration) to Implementation Roadmap. Shifted Phase 1–6 week numbers by 2 weeks (now 14-week roadmap). Added Section 17 (Historical Data Architecture & Backtest Replay): contract symbol resolution, schema extensions, replay engine, prior calibration workflow. Added Section 18 (Analytics Dashboard Specification): 7 dashboard pages with full component specs, API endpoint list, and frontend tech stack. Updated ToC. |
 
 ---
 
