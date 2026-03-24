@@ -1,0 +1,90 @@
+version: '3.9'
+
+# ============================================================
+# TRADE ENGINE — Local Development Stack
+# ============================================================
+# Usage:
+#   docker compose up -d          # start all services
+#   docker compose down           # stop all services
+#   docker compose down -v        # stop and delete all data volumes
+#
+# Services exposed:
+#   TimescaleDB (PostgreSQL 16):  localhost:5432
+#   Redis 7:                      localhost:6379
+#   pgAdmin (optional):           localhost:5050
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # TimescaleDB (PostgreSQL 16 + TimescaleDB extension)
+  # ----------------------------------------------------------
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: trade-engine-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: trade_engine
+      POSTGRES_USER: trade_engine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev_only_not_for_prod}
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./infra/db/init:/docker-entrypoint-initdb.d:ro  # optional init scripts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trade_engine -d trade_engine"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ----------------------------------------------------------
+  # Redis 7 (Streams + pub/sub + BullMQ queue)
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: trade-engine-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ----------------------------------------------------------
+  # pgAdmin 4 (optional — comment out if not needed)
+  # Access at http://localhost:5050
+  # Login: admin@trade-engine.local / admin
+  # ----------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: trade-engine-pgadmin
+    restart: unless-stopped
+    profiles: ["tools"]   # only starts with: docker compose --profile tools up
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@trade-engine.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+volumes:
+  timescaledb_data:
+  redis_data:
+  pgadmin_data:
