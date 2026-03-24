@@ -147,6 +147,59 @@ Weekly index options traders face a fundamental timing problem:
 
 ---
 
+### 2.4 Capital Allocation Model
+
+Every trader operates with capital sufficient for **6 lots** total. This capacity is split into two tranches:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     CAPITAL ALLOCATION MODEL                            │
+├──────────────────────────────┬──────────────────────────────────────────┤
+│   TRANCHE 1 — Baseline       │   TRANCHE 2 — Agent Reserve             │
+│   3 lots                     │   3 lots                                 │
+│                              │                                          │
+│   • Deployed at 9:17 AM      │   • Held back initially                  │
+│   • All 3 strategies run     │   • Agents decide when/how to deploy    │
+│   • Day 1 default, no        │   • 0 to 3 lots, any time               │
+│     conditions required      │   • Can also modify Tranche 1           │
+│                              │                                          │
+│   Evolves over time based    │   Optimized via Retrospection Engine     │
+│   on agent rule output       │   from day 1 data onwards               │
+└──────────────────────────────┴──────────────────────────────────────────┘
+```
+
+#### Tranche 1 — Baseline Deployment
+
+- **Day 1 behaviour:** Deploy all 3 strategies using 3 lots at 9:17 AM, unconditionally. This is the starting prior — a sensible human default that gives the system live data from the first trading session.
+- **Evolves from Day 2 onwards:** Rule-based agents observe outcomes from Tranche 1 and can adjust:
+  - Entry time (e.g. shift from 9:17 → 9:24)
+  - Lot count (e.g. reduce to 2 lots on high-VIX days)
+  - Which strategies to include
+  - Whether to skip entirely (circuit breaker conditions)
+- **Override triggers** (minimum evidence required before agents can adjust baseline):
+  - At least **10 trading sessions** of data for time-shift decisions
+  - At least **3 consecutive losing days** to trigger lot reduction
+  - Statistically significant p-value (< 0.05) from Retrospection Engine for strategy removal
+
+#### Tranche 2 — Agent Reserve
+
+- Held in reserve each morning.
+- Retrospection Engine governs deployment: entry time, lot count (0–3), strategy selection.
+- Can also instruct Tranche 1 adjustments (e.g. early exit, hedge addition).
+- On **Day 1**, reserve stays undeployed — agents have no data yet to act on.
+
+#### Why This Split Works
+
+| Concern | Resolution |
+|---------|------------|
+| Cold-start problem | Tranche 1 generates live data from Day 1 |
+| RL/agents need baseline to compare against | Tranche 1 is the consistent control group |
+| Risk of over-trading | Total exposure always capped at 6 lots |
+| Risk of under-trading | Tranche 1 guarantees minimum market participation |
+| Interpretability | Rule-based agent adjustments are explainable |
+
+---
+
 ## 3. Core Hypothesis
 
 ### 3.1 Primary Hypothesis
@@ -162,6 +215,7 @@ Weekly index options traders face a fundamental timing problem:
 | H3 | Conservative personalities outperform in low-VIX regimes | Win rate differential > 15% when India VIX < 14 |
 | H4 | Time-staggered entries reduce variance | 10-min delayed entries have lower drawdown than immediate entries |
 | H5 | Profit-gated trading improves risk-adjusted returns | Skipping trades after losing streaks improves Sharpe by >0.3 |
+| H6 | Baseline 9:17 entry (Tranche 1) provides a statistically measurable starting prior | After 20 sessions, Tranche 1 win rate deviates from 50% with p < 0.05, giving agents a calibration anchor |
 
 ### 3.3 Falsification Criteria
 
@@ -1200,7 +1254,130 @@ class BayesianProbabilityModel {
 }
 ```
 
-### 8.3 Time-Staggered Entry Analysis
+### 8.3 Baseline Deployment Algorithm
+
+This algorithm governs Tranche 1 — the default 3-lot deployment that runs from Day 1 and evolves via rule-based agent decisions.
+
+#### Day 1 Behaviour (Cold Start)
+
+```typescript
+interface BaselineConfig {
+  entryTime: string;              // Default: '09:17'
+  lots: number;                   // Default: 3
+  strategies: StrategyType[];     // Default: all 3 strategies
+  isActive: boolean;              // Default: true
+  version: number;
+  lastModifiedReason: string | null;
+}
+
+const BASELINE_DEFAULT: BaselineConfig = {
+  entryTime: '09:17',
+  lots: 3,
+  strategies: ['NON_DIRECTIONAL', 'DIRECTIONAL', 'MOMENTUM_BUY'],
+  isActive: true,
+  version: 1,
+  lastModifiedReason: null
+};
+```
+
+On Day 1, `BASELINE_DEFAULT` is used without any conditions. No signal check, no regime filter — just deploy.
+
+#### Agent Evolution (Day 2 Onwards)
+
+Agents evaluate baseline performance each EOD and propose adjustments. A proposal is only applied if it clears the minimum evidence threshold:
+
+```typescript
+interface BaselineEvolutionProposal {
+  proposedConfig: Partial<BaselineConfig>;
+  triggerRule: string;
+  evidenceSessions: number;     // How many sessions of data support this
+  pValue: number | null;        // Statistical significance where applicable
+  requiresReview: boolean;      // Always true for lot changes
+}
+
+const BASELINE_EVOLUTION_RULES = [
+  {
+    name: 'ShiftEntryTimeOnPersistentLoss',
+    // Shift entry time if 9:17 entry consistently underperforms later entries
+    trigger: (m: BaselineMetrics) =>
+      m.sessions >= 10 &&
+      m.avgPnLAt917 < m.avgPnLAt924 * 0.8, // 9:17 returns 20% worse than 9:24
+    action: (config: BaselineConfig): Partial<BaselineConfig> => ({
+      entryTime: '09:24',
+      lastModifiedReason: 'Agent: 9:17 entry underperforming 9:24 by >20% over 10+ sessions'
+    }),
+    minSessions: 10,
+    cooldownDays: 14
+  },
+
+  {
+    name: 'ReduceLotsOnConsecutiveLoss',
+    // Reduce to 2 lots after 3 consecutive losing days on Tranche 1
+    trigger: (m: BaselineMetrics) =>
+      m.consecutiveLossDays >= 3,
+    action: (config: BaselineConfig): Partial<BaselineConfig> => ({
+      lots: Math.max(config.lots - 1, 1),
+      lastModifiedReason: 'Agent: 3 consecutive losing days on baseline'
+    }),
+    minSessions: 3,
+    cooldownDays: 7
+  },
+
+  {
+    name: 'DropUnderperformingStrategy',
+    // Remove a strategy from baseline if it has statistically significant negative contribution
+    trigger: (m: BaselineMetrics) =>
+      m.sessions >= 20 &&
+      m.worstStrategyPValue < 0.05 &&
+      m.worstStrategyAvgPnL < 0,
+    action: (config: BaselineConfig, worstStrategy: StrategyType): Partial<BaselineConfig> => ({
+      strategies: config.strategies.filter(s => s !== worstStrategy),
+      lastModifiedReason: `Agent: ${worstStrategy} statistically negative (p < 0.05) over 20+ sessions`
+    }),
+    minSessions: 20,
+    cooldownDays: 30
+  },
+
+  {
+    name: 'RestoreBaselineAfterRecovery',
+    // Restore lots/strategies if performance recovers
+    trigger: (m: BaselineMetrics) =>
+      m.lots < 3 &&
+      m.winRate10d >= 0.55 &&
+      m.sessions >= 10,
+    action: (): Partial<BaselineConfig> => ({
+      lots: 3,
+      lastModifiedReason: 'Agent: Performance recovered, restoring baseline lots'
+    }),
+    minSessions: 10,
+    cooldownDays: 7
+  }
+];
+```
+
+#### Baseline State Tracking (DB)
+
+```sql
+CREATE TABLE baseline_config_history (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    effective_date      DATE NOT NULL,
+    entry_time          VARCHAR(5) NOT NULL DEFAULT '09:17',
+    lots                INTEGER NOT NULL DEFAULT 3,
+    strategies          TEXT[] NOT NULL,
+    is_active           BOOLEAN NOT NULL DEFAULT TRUE,
+    version             INTEGER NOT NULL DEFAULT 1,
+    change_reason       TEXT,
+    proposed_by         VARCHAR(50),   -- 'AGENT' or 'MANUAL'
+    reviewed_by         VARCHAR(50),   -- Human reviewer
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Always insert, never update — full audit trail of baseline evolution
+```
+
+---
+
+### 8.4 Time-Staggered Entry Analysis
 
 For each signal, we simulate entries at multiple time offsets:
 
@@ -1872,6 +2049,31 @@ const EVOLUTION_RULES: EvolutionRule[] = [
       evolutionReason: 'Auto: High P&L variance'
     }),
     cooldownDays: 30,
+    requiresReview: true
+  },
+
+  // ---- Baseline (Tranche 1) Evolution Rules ----
+  {
+    name: 'BaselineShiftEntryTime',
+    trigger: (m) => m.isBaselineRule &&
+      m.sessions >= 10 &&
+      m.baselineAvgPnLAt917 < m.baselineAvgPnLAt924 * 0.8,
+    action: (config) => ({
+      ...config,
+      evolutionReason: 'Auto: Baseline 9:17 entry underperforming 9:24 over 10+ sessions'
+    }),
+    cooldownDays: 14,
+    requiresReview: true
+  },
+
+  {
+    name: 'BaselineReduceLotsOnLoss',
+    trigger: (m) => m.isBaselineRule && m.consecutiveLossDays >= 3,
+    action: (config) => ({
+      ...config,
+      evolutionReason: 'Auto: Baseline 3 consecutive losing days — reduce lots'
+    }),
+    cooldownDays: 7,
     requiresReview: true
   }
 ];
@@ -2759,6 +2961,7 @@ class Backtester {
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2024-01-15 | Trading Systems | Initial draft |
+| 1.1 | 2026-03-24 | Trading Systems | Added Capital Allocation Model (Section 2.4): 6-lot split into Tranche 1 (3-lot baseline at 9:17, agent-evolvable) and Tranche 2 (agent reserve). Added Baseline Deployment Algorithm (Section 8.3). Added H6 to core hypotheses. Added baseline evolution rules to Retrospection Engine. |
 
 ---
 
