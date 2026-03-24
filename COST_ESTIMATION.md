@@ -1,8 +1,8 @@
 # Cost Estimation — AI-Powered Options Trading Optimization System
 
-**Version:** 1.0
+**Version:** 1.1
 **Date:** 2026-03-24
-**Scope:** Paper trading phase (Phase 1–6 of implementation roadmap)
+**Scope:** Paper trading phase (Phase 0–6 of implementation roadmap)
 
 ---
 
@@ -103,16 +103,24 @@ If you have an active trading account, broker APIs are **free**:
 | NSE Direct (Level 1) | ₹15,000+ | Real-time | Enterprise-grade, overkill |
 | Upstox API | ₹0 | Real-time | Free with active account |
 
-### 2.3 Historical Data (One-Time Cost for Backtesting)
+### 2.3 Historical Data (One-Time Cost — Phase 0)
 
-| Source | Cost | Coverage |
-|--------|------|----------|
-| Broker API (Fyers/Zerodha) | ₹0 | 1–3 years, 1-min OHLCV |
-| TrueData historical | ₹5,000 – ₹20,000 | 5–10 years, tick level |
-| Unofficed/NSEpy | ₹0 | EOD only, limited options data |
-| BharatTrader (custom) | ₹3,000 – ₹8,000 | Options OI + premium history |
+Phase 0 requires 2–3 years of 1-min OHLCV for ATM strikes (CE/PE/Spot/VIX) across Nifty, BankNifty, Sensex. This is **not** the full option chain — only the 5–7 contracts needed per underlying per day, making storage and cost manageable.
 
-**Recommendation:** Start with broker API historical data (free). If backtesting reveals gaps, purchase TrueData's options history package (~₹10,000 one-time for 3 years).
+| Source | Cost | Coverage | Quality | Notes |
+|--------|------|----------|---------|-------|
+| **Fyers API** | ₹0 | ~400 trading days (~1.5 years) | Good | Free via `/data/history`, 1-min OHLCV, F&O included. Best starting point. |
+| **TrueData historical** | ₹10,000 – ₹15,000 one-time | 5+ years | Excellent | Cleanest Indian F&O data, minimal gaps, 1-min OHLCV. Recommended for 3-year coverage. |
+| **Global Datafeeds** | ₹5,000 – ₹10,000 one-time | 3–5 years | Good | Slightly cheaper than TrueData, SFTP or API delivery. |
+| **Unofficed / NSEPy** | ₹0 | 2–3 years | Mixed | Community-scraped, frequent gaps, predominantly EOD. Risky for backtesting. |
+
+**Recommended Phase 0 approach:**
+1. **Immediately:** Pull ~1.5 years via Fyers free API. No cost, sufficient for initial calibration.
+2. **After first backtest validates the system:** Purchase TrueData 3-year historical package (₹10,000–₹15,000 one-time) to deepen prior confidence and extend regime coverage.
+
+**Storage estimate:** ~5–8 GB for 3 years of 1-min OHLCV across 3 underlyings × 5–7 contracts/day. Fits comfortably on the Hetzner CX32 VPS.
+
+**Phase 0 timeline:** ~2 weeks of engineering effort (see Section 14, Phase 0 in the spec). Historical data acquisition and backtest calibration happen before paper trading begins.
 
 ### 2.4 India VIX Data
 
@@ -218,10 +226,12 @@ Quantiply is the target paper trading platform. Pricing to be confirmed with ven
 
 | Item | Cost | Notes |
 |------|------|-------|
-| Historical options data (3 years) | ₹10,000 – ₹20,000 | For backtesting; optional if using broker history |
+| Historical options data — Fyers free (Year 1, ~1.5 years) | ₹0 | Phase 0 starting point; pull immediately |
+| Historical options data — TrueData (3 years, if needed) | ₹10,000 – ₹15,000 | After initial validation; deeper prior calibration |
 | Domain name (2-year registration) | ₹1,500 | Optional |
 | Development tools / licenses | ₹0 | VS Code, GitHub — all free |
-| **Total one-time** | **₹10,000 – ₹22,000** | |
+| **Total one-time (Fyers only)** | **₹1,500** | If broker free data is sufficient |
+| **Total one-time (with TrueData)** | **₹11,500 – ₹16,500** | Recommended for 3-year backtest coverage |
 
 ---
 
@@ -251,3 +261,4 @@ The system's core goal is **paper trading optimisation** — no real capital is 
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2026-03-24 | Initial cost estimation document |
+| 1.1 | 2026-03-24 | Expanded Section 2.3 with Phase 0 historical data strategy: Fyers free API (₹0, 1.5 years) as starting point, TrueData (₹10,000–₹15,000 one-time) for 3-year coverage. Updated Section 7 one-time costs table with two scenarios. Scope updated to Phase 0–6. |
