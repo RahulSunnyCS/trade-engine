@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BUN_VERSION: "1.x"
+  NODE_VERSION: "20"
 
 jobs:
   # --------------------------------------------------------
@@ -27,64 +27,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lockb') }}
-          restore-keys: bun-${{ runner.os }}-
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: npm ci
 
       - name: TypeScript type check
-        run: bun run typecheck
+        run: npm run build
 
       - name: Lint
-        run: bun run lint
+        run: npm run lint
 
   # --------------------------------------------------------
-  # Job 2: Unit Tests
-  # Runs without DB/Redis — pure logic tests
-  # --------------------------------------------------------
-  unit-tests:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    needs: typecheck-and-lint
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lockb') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Run unit tests
-        run: bun run test:unit
-        env:
-          NODE_ENV: test
-
-  # --------------------------------------------------------
-  # Job 3: Integration Tests
+  # Job 2: Tests
   # Spins up TimescaleDB + Redis via service containers
   # --------------------------------------------------------
-  integration-tests:
-    name: Integration Tests
+  tests:
+    name: Tests
     runs-on: ubuntu-latest
     needs: typecheck-and-lint
 
@@ -116,63 +79,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lockb') }}
-          restore-keys: bun-${{ runner.os }}-
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: npm ci
 
       - name: Run database migrations
-        run: bun run db:migrate
+        run: npm run db:migrate
         env:
           DATABASE_URL: postgresql://trade_engine:ci_test_password@localhost:5432/trade_engine_test
 
-      - name: Run integration tests
-        run: bun run test:integration
+      - name: Run tests
+        run: npm run test
         env:
           NODE_ENV: test
           DATABASE_URL: postgresql://trade_engine:ci_test_password@localhost:5432/trade_engine_test
           REDIS_URL: redis://localhost:6379
           FYERS_PAPER_TRADING: "true"
-          # Fyers credentials are NOT set in CI — integration tests use mock/stub clients
+          DATA_PROVIDER: mock
+          # Fyers credentials are NOT set in CI — tests use mock/stub clients
 
   # --------------------------------------------------------
-  # Job 4: Build Check
-  # Ensures the project builds cleanly
+  # Job 3: Build Check
+  # Ensures the project compiles cleanly to dist/
   # --------------------------------------------------------
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests]
+    needs: tests
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lockb') }}
-          restore-keys: bun-${{ runner.os }}-
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: npm ci
 
-      - name: Build backend
-        run: bun run build
-
-      - name: Build frontend
-        run: bun run build:frontend
+      - name: Build
+        run: npm run build
