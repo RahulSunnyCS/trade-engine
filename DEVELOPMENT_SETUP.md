@@ -1,6 +1,6 @@
 # Development Setup
 
-Complete guide to running trade-engine locally.
+Step-by-step guide to running trade-engine locally.
 
 ---
 
@@ -8,63 +8,138 @@ Complete guide to running trade-engine locally.
 
 | Tool | Version | Install |
 |------|---------|---------|
-| Bun | 1.x | `curl -fsSL https://bun.sh/install \| bash` |
+| Node.js | 20.x LTS | [nodejs.org](https://nodejs.org/) or `nvm install 20` |
+| npm | 10.x (bundled with Node) | — |
 | Docker + Docker Compose | 24+ | [docker.com/get-started](https://www.docker.com/get-started/) |
 | Git | any | system package manager |
 
----
-
-## Quick Start
+Verify your setup:
 
 ```bash
-# 1. Clone and enter repo
-git clone https://github.com/rahulsunnycs/trade-engine.git
-cd trade-engine
-
-# 2. Copy environment template
-cp .env.example .env
-
-# 3. Fill in required values (see Environment Variables below)
-# At minimum: POSTGRES_PASSWORD, FYERS_APP_ID, FYERS_SECRET_KEY
-
-# 4. Start infrastructure
-docker compose up -d
-
-# 5. Install dependencies
-bun install
-
-# 6. Run database migrations
-bun run db:migrate
-
-# 7. Start the backend dev server
-bun run dev
-
-# 8. (Separate terminal) Start the frontend dev server
-bun run dev:frontend
+node -v       # should print v20.x.x
+npm -v        # should print 10.x.x
+docker -v     # should print 24+
 ```
-
-Backend will be at `http://localhost:3000`
-Frontend will be at `http://localhost:5173`
 
 ---
 
-## Infrastructure (Docker Compose)
+## Step 1 — Clone the Repository
 
-The local stack runs three services:
+```bash
+git clone https://github.com/rahulsunnycs/trade-engine.git
+cd trade-engine
+```
+
+---
+
+## Step 2 — Configure Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in the required values:
+
+| Variable | Required | How to get it |
+|----------|----------|---------------|
+| `POSTGRES_PASSWORD` | Yes | Any string (e.g. `localdev123`) |
+| `DATABASE_URL` | Yes | Replace `REPLACE_PASSWORD` with your `POSTGRES_PASSWORD` |
+| `SESSION_SECRET` | Yes | `openssl rand -hex 32` |
+| `JWT_SECRET` | Yes | `openssl rand -hex 32` |
+| `FYERS_APP_ID` | Phase 1+ | [myapi.fyers.in](https://myapi.fyers.in/dashboard) |
+| `FYERS_SECRET_KEY` | Phase 1+ | Fyers developer dashboard |
+| `FYERS_ACCESS_TOKEN` | Phase 1+ | OAuth2 flow (see below) |
+
+> **Tip:** For early development, set `DATA_PROVIDER=mock` in `.env` to skip Fyers credentials entirely.
+
+### Getting Fyers API Credentials (optional for mock mode)
+
+1. Create an account at [myapi.fyers.in](https://myapi.fyers.in/dashboard)
+2. Create a new app → set redirect URI to `http://localhost:3000/auth/fyers/callback`
+3. Copy **App ID** → `FYERS_APP_ID` and **Secret Key** → `FYERS_SECRET_KEY`
+4. The access token is short-lived (1 day) — set it manually for now
+
+---
+
+## Step 3 — Start Infrastructure (Docker)
+
+```bash
+docker compose up -d
+```
+
+This starts:
 
 ```
 TimescaleDB (PostgreSQL 16)  →  localhost:5432
 Redis 7                       →  localhost:6379
-pgAdmin 4 (optional)          →  localhost:5050
 ```
 
-### Common commands
+Check services are healthy:
+
+```bash
+docker compose ps
+```
+
+**Optional** — start with pgAdmin (visual DB browser at `localhost:5050`):
+
+```bash
+docker compose --profile tools up -d
+```
+
+---
+
+## Step 4 — Install Dependencies
+
+```bash
+npm install
+```
+
+---
+
+## Step 5 — Run Database Migrations
+
+```bash
+npm run db:migrate
+```
+
+This applies all pending SQL migrations from `src/db/migrations/`.
+
+---
+
+## Step 6 — Start the Dev Server
+
+```bash
+npm run dev
+```
+
+The backend starts at `http://localhost:3000`.
+
+---
+
+## Available Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start backend in watch mode (ts-node) |
+| `npm run build` | Compile TypeScript to `dist/` |
+| `npm run test` | Run all tests |
+| `npm run test:watch` | Run tests in watch mode |
+| `npm run test:coverage` | Run tests with coverage report |
+| `npm run lint` | Run ESLint on `src/` |
+| `npm run db:migrate` | Apply pending DB migrations |
+| `npm run backtest` | Run backtesting engine |
+| `npm run ingest:mock` | Ingest data using mock provider |
+| `npm run ingest:fyers` | Ingest data using Fyers live feed |
+
+---
+
+## Infrastructure Commands
 
 ```bash
 # Start all services
 docker compose up -d
 
-# Start with pgAdmin (optional dev tool)
+# Start with pgAdmin
 docker compose --profile tools up -d
 
 # Stop services (data preserved)
@@ -83,51 +158,26 @@ docker exec -it trade-engine-db psql -U trade_engine -d trade_engine
 
 ---
 
-## Environment Variables
+## Project Structure
 
-See `.env.example` for the full list. Key variables to set before first run:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `POSTGRES_PASSWORD` | Yes | Any string for local dev |
-| `DATABASE_URL` | Yes | Update with your `POSTGRES_PASSWORD` |
-| `FYERS_APP_ID` | Yes (Phase 1+) | From [myapi.fyers.in](https://myapi.fyers.in/dashboard) |
-| `FYERS_SECRET_KEY` | Yes (Phase 1+) | From Fyers developer dashboard |
-| `FYERS_ACCESS_TOKEN` | Yes (Phase 1+) | Retrieved via OAuth2 flow (daily) |
-| `SESSION_SECRET` | Yes | `openssl rand -hex 32` |
-| `JWT_SECRET` | Yes | `openssl rand -hex 32` |
-
-Everything else is optional for early phases.
-
-### Getting Fyers API credentials
-
-1. Create an account at [myapi.fyers.in](https://myapi.fyers.in/dashboard)
-2. Create a new app → set redirect URI to `http://localhost:3000/auth/fyers/callback`
-3. Copy `App ID` → `FYERS_APP_ID` and `Secret Key` → `FYERS_SECRET_KEY`
-4. Run `bun run auth:fyers` to complete the OAuth2 flow and get your first access token
-5. The app will auto-refresh the token daily, but you may need to re-auth manually if it expires
-
----
-
-## Database Migrations
-
-Migrations are managed with **Drizzle ORM**. Schema files live in `src/db/schema/`.
-
-```bash
-# Apply all pending migrations
-bun run db:migrate
-
-# Generate a new migration from schema changes
-bun run db:generate
-
-# Open Drizzle Studio (visual DB browser)
-bun run db:studio
-
-# Reset DB and re-run all migrations (dev only — destroys data)
-bun run db:reset
 ```
-
-Migration files are in `src/db/migrations/` and are committed to the repo. Never delete or edit existing migration files.
+trade-engine/
+├── src/
+│   ├── backtesting/         # Backtesting engine, metrics, reports
+│   ├── config/              # Strategy personality configs
+│   ├── data/                # Market data providers (mock, fyers)
+│   ├── db/                  # DB client, migrations
+│   ├── signals/             # Signal detection logic
+│   ├── types/               # Shared TypeScript types
+│   ├── utils/               # Utility helpers
+│   └── __tests__/           # Jest test suites
+├── infra/
+│   └── db/init/             # TimescaleDB init scripts
+├── docker-compose.yml       # Local dev infrastructure
+├── .env.example             # Environment variable template
+├── tsconfig.json
+└── package.json
+```
 
 ---
 
@@ -135,19 +185,36 @@ Migration files are in `src/db/migrations/` and are committed to the repo. Never
 
 ```bash
 # All tests
-bun run test
-
-# Unit tests only (no DB/Redis required)
-bun run test:unit
-
-# Integration tests (requires Docker services running)
-bun run test:integration
+npm run test
 
 # Watch mode
-bun run test --watch
+npm run test:watch
 
-# Coverage
-bun run test:coverage
+# With coverage
+npm run test:coverage
+```
+
+> Integration tests require Docker services to be running (`docker compose up -d`).
+
+---
+
+## Troubleshooting
+
+**DB connection refused**
+- Make sure Docker is running: `docker compose ps`
+- Wait for the health check to pass (up to 30s on first start)
+
+**`npm run db:migrate` fails**
+- Confirm `DATABASE_URL` in `.env` has the correct password
+- Confirm TimescaleDB container is healthy
+
+**Port already in use**
+- `lsof -i :5432` or `lsof -i :3000` to find the conflicting process
+
+**Fresh start (wipe everything)**
+```bash
+docker compose down -v
+npm run db:migrate
 ```
 
 ---
@@ -157,56 +224,17 @@ bun run test:coverage
 | Environment | Approach |
 |-------------|----------|
 | **Local dev** | `.env` file (gitignored). Never commit. |
-| **CI (GitHub Actions)** | GitHub repository secrets. Add via Settings → Secrets and Variables → Actions. |
-| **Production (Hetzner)** | Environment variables set directly on the server. Use `systemd` `EnvironmentFile` pointing to a root-owned `.env` with `chmod 600`. |
-
-**CI secrets needed** (add to GitHub repo secrets):
-- `DATABASE_URL` — not needed; CI uses ephemeral service containers
-- `SENTRY_DSN` — optional, for CI error reporting
-- No Fyers credentials in CI — integration tests use stub clients
-
-**Rotating secrets:**
-- Fyers access token: auto-rotated daily by the app
-- `SESSION_SECRET` / `JWT_SECRET`: rotate by updating `.env` + restarting the server (invalidates all sessions)
-- Database password: update in `.env`, `docker-compose.yml`, and restart compose
-
----
-
-## Project Structure (planned)
-
-```
-trade-engine/
-├── src/
-│   ├── db/
-│   │   ├── schema/          # Drizzle schema definitions (TypeScript)
-│   │   └── migrations/      # Auto-generated SQL migration files
-│   ├── services/
-│   │   ├── market-data/     # Fyers WebSocket feed + historical ingestion
-│   │   ├── straddle/        # ATM straddle calculator + ROC engine
-│   │   ├── signals/         # Peak detector + signal generator
-│   │   ├── personalities/   # Bot configs + personality router
-│   │   ├── executor/        # Fyers paper trade executor
-│   │   ├── positions/       # Position manager + P&L tracker
-│   │   └── retrospection/   # EOD analysis + parameter evolution
-│   ├── api/                 # Fastify routes + WebSocket handlers
-│   └── utils/
-├── frontend/                # React + Vite dashboard
-├── infra/
-│   └── db/init/             # One-time DB init scripts (TimescaleDB extensions)
-├── .github/workflows/       # CI pipeline
-├── docker-compose.yml       # Local dev infrastructure
-├── .env.example             # Environment variable template
-└── OPTIONS_TRADING_OPTIMIZER_TECH_SPEC.md
-```
+| **CI (GitHub Actions)** | GitHub repository secrets (Settings → Secrets and Variables → Actions) |
+| **Production (Hetzner)** | `systemd` `EnvironmentFile` pointing to root-owned `.env` with `chmod 600` |
 
 ---
 
 ## Production Deployment (Hetzner CX32)
 
-> Not needed until Phase 6 validation. Document this when ready.
+> Not needed until Phase 6 validation.
 
-- Hetzner CX32: 4 vCPU, 8GB RAM, €14.90/month
-- TimescaleDB: Timescale Cloud free tier (10GB, sufficient for 1-year history)
-- Redis: self-hosted on the same VPS
-- Process manager: `systemd` service unit
+- Hetzner CX32: 4 vCPU, 8 GB RAM, ~€14.90/month
+- TimescaleDB: Timescale Cloud free tier (10 GB)
+- Redis: self-hosted on same VPS
+- Process manager: `systemd`
 - Reverse proxy: `caddy` (auto-HTTPS)
