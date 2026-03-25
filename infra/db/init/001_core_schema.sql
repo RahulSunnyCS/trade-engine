@@ -78,6 +78,27 @@ CREATE TABLE IF NOT EXISTS personality_configs (
 );
 
 -- ---- Paper trades ---------------------------------------
+-- Drop paper_trades if it exists with legacy PRIMARY KEY (id) only — TimescaleDB
+-- requires the partition column (trade_time) to be part of every unique constraint.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'paper_trades'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.key_column_usage kcu
+    JOIN information_schema.table_constraints tc
+      ON kcu.constraint_name = tc.constraint_name
+     AND kcu.table_schema   = tc.constraint_schema
+    WHERE tc.table_schema    = 'public'
+      AND tc.table_name      = 'paper_trades'
+      AND tc.constraint_type = 'PRIMARY KEY'
+      AND kcu.column_name    = 'trade_time'
+  ) THEN
+    DROP TABLE paper_trades CASCADE;
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS paper_trades (
   id                VARCHAR(36)     NOT NULL,
   trade_time        TIMESTAMPTZ     NOT NULL,

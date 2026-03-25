@@ -52,7 +52,7 @@ export async function closePool(): Promise<void> {
   }
 }
 
-/** Run all SQL migration files in order */
+/** Run all SQL migration files in order, skipping already-applied ones. */
 export async function runMigrations(): Promise<void> {
   const migrationsDir = path.join(__dirname, '../../infra/db/init');
   const files = fs
@@ -60,10 +60,31 @@ export async function runMigrations(): Promise<void> {
     .filter((f) => f.endsWith('.sql'))
     .sort();
 
+  await getPool().query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      filename   TEXT        PRIMARY KEY,
+      applied_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   for (const file of files) {
+    const { rows } = await getPool().query(
+      'SELECT 1 FROM schema_migrations WHERE filename = $1',
+      [file]
+    );
+    if (rows.length > 0) {
+      console.log(`Skipping migration (already applied): ${file}`);
+      continue;
+    }
+
     const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
     console.log(`Running migration: ${file}`);
     await getPool().query(sql);
+    await getPool().query(
+      'INSERT INTO schema_migrations (filename) VALUES ($1)',
+      [file]
+    );
+    console.log(`Migration applied: ${file}`);
   }
   console.log('All migrations complete.');
 }
