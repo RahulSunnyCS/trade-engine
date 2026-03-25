@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS personality_configs (
 
 -- ---- Paper trades ---------------------------------------
 CREATE TABLE IF NOT EXISTS paper_trades (
-  id                VARCHAR(36)     PRIMARY KEY,
+  id                VARCHAR(36)     NOT NULL,
   trade_time        TIMESTAMPTZ     NOT NULL,
   personality_id    VARCHAR(50)     REFERENCES personality_configs(id),
   signal_id         VARCHAR(36)     REFERENCES trading_signals(id),
@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   exit_time         TIMESTAMPTZ,
   market_regime     VARCHAR(20),
   vix_at_entry      NUMERIC(6,2),
-  status            VARCHAR(20)     DEFAULT 'OPEN'  -- OPEN | CLOSED
+  status            VARCHAR(20)     DEFAULT 'OPEN',  -- OPEN | CLOSED
+  PRIMARY KEY (id, trade_time)
 );
 SELECT create_hypertable('paper_trades', 'trade_time', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_personality ON paper_trades (personality_id, trade_time DESC);
