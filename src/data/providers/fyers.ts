@@ -326,7 +326,7 @@ export class FyersDataProvider implements HistoricalDataProvider {
     date: Date,
     underlying: Underlying,
     atmStrike: number,
-    dte: number
+    _dte: number
   ): StraddleSnapshot[] {
     const snapshots: StraddleSnapshot[] = [];
     const dayOpen = ceData[0]?.open ?? 0;
