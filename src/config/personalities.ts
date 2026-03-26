@@ -18,7 +18,7 @@ export const DEFAULT_PERSONALITIES: PersonalityConfig[] = [
     profitGateThreshold: 0,
     profitGateLookbackDays: 5,
     allowedTradingWindows: [
-      { startTime: '09:20', endTime: '11:30' },
+      { startTime: '09:17', endTime: '11:30' },
       { startTime: '14:00', endTime: '15:00' },
     ],
     blockedDates: [],
