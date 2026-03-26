@@ -219,11 +219,12 @@ export class FyersDataProvider implements HistoricalDataProvider {
       // Calculate ATM strike based on opening spot price
       const atmStrike = calculateATMStrike(spotData[0].open, underlying);
 
-      // Construct symbols for ATM call and put
-      const ceSymbol = this.buildOptionSymbol(underlying, date, atmStrike, 'CE');
-      const peSymbol = this.buildOptionSymbol(underlying, date, atmStrike, 'PE');
+      // Compute expiry date first so option symbols use the correct expiry stamp
+      const expiryDate = this.getWeeklyExpiryDate(date, underlying);
 
-      const expiryDate = this.getWeeklyExpiryDate(date);
+      // Construct symbols for ATM call and put
+      const ceSymbol = this.buildOptionSymbol(underlying, expiryDate, atmStrike, 'CE');
+      const peSymbol = this.buildOptionSymbol(underlying, expiryDate, atmStrike, 'PE');
       const dte = daysToExpiry(date, underlying);
 
       // Fetch historical data for call and put
@@ -287,10 +288,20 @@ export class FyersDataProvider implements HistoricalDataProvider {
     return spotSymbols[underlying];
   }
 
-  private getWeeklyExpiryDate(date: Date): Date {
-    // Weekly options expire on Wednesday (3)
+  private getWeeklyExpiryDate(date: Date, underlying: Underlying): Date {
+    // Expiry weekday depends on underlying:
+    //   NIFTY     → Thursday (4)
+    //   BANKNIFTY → Wednesday (3)
+    //   SENSEX    → Friday (5)
+    const expiryDayMap: Record<Underlying, number> = {
+      NIFTY: 4,
+      BANKNIFTY: 3,
+      SENSEX: 5,
+    };
+    const expiryDay = expiryDayMap[underlying];
     const d = new Date(date);
-    while (d.getDay() !== 3 || d <= date) {
+    // Advance only if today is not already the expiry day
+    while (d.getDay() !== expiryDay) {
       d.setDate(d.getDate() + 1);
     }
     return d;
@@ -329,7 +340,8 @@ export class FyersDataProvider implements HistoricalDataProvider {
     _dte: number
   ): StraddleSnapshot[] {
     const snapshots: StraddleSnapshot[] = [];
-    const dayOpen = ceData[0]?.open ?? 0;
+    // Use full straddle open (CE + PE) so straddleChangeFromOpen has the correct denominator
+    const dayOpen = (ceData[0]?.open ?? 0) + (peData[0]?.open ?? 0);
 
     // Merge by timestamp
     for (let i = 0; i < Math.min(ceData.length, peData.length); i++) {
