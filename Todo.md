@@ -4,9 +4,11 @@
 
 ---
 
-## Phase 0 — Backtesting Foundation `[x]`
+## Phase 0 — Backtesting Foundation `[!]` Blocked on Bug Fixes
 
 **What this is:** Build the offline simulation engine that replays historical straddle data, evaluates entry signals, applies personality-based trade filters, computes realistic P&L with charges and slippage, and produces performance reports. This is the research core — everything in later phases depends on it being correct and battle-tested.
+
+**⚠️ STATUS:** Code structure complete, but **3 critical bugs** prevent validation. See `PHASE_0_BUG_REPORT.md` for details.
 
 | # | Task | Status |
 |---|------|--------|
@@ -18,24 +20,36 @@
 | 0.6 | Backtesting engine — zero-look-ahead chronological replay loop | `[x]` |
 | 0.7 | Charge structure — brokerage, STT, exchange fees, GST, SEBI, stamp duty | `[x]` |
 | 0.8 | Slippage models — zero, half-spread, custom | `[x]` |
-| 0.9 | Performance metrics — Sharpe, max drawdown, win rate, profit factor, equity curve | `[x]` |
-| 0.10 | Personality configs — Conservative, Balanced, Aggressive defaults | `[x]` |
+| 0.9 | Performance metrics — Sharpe, max drawdown, win rate, profit factor, equity curve | `[~]` Validation needed |
+| 0.10 | Personality configs — Conservative, Balanced, Aggressive defaults | `[~]` Time window bug |
 | 0.11 | Backtesting report generator — regime / personality / entry-time breakdowns | `[x]` |
 | 0.12 | Database client — pg connection pool, query helper, migration runner | `[x]` |
 | 0.13 | DB schema — historical ticks, spot, backtest runs, backtest trades | `[x]` |
 | 0.14 | Jest test suite — backtester, mock provider, ATM strike, ROC engine | `[x]` |
-| 0.15 | GitHub Actions CI — type-check, lint, test with service containers | `[x]` |
-| 0.16 | Docker Compose infra — TimescaleDB + Redis local setup | `[x]` |
+| 0.15 | **BLOCKED:** Create ESLint config (`.eslintrc.json` missing) | `[ ]` |
+| 0.16 | **BLOCKED:** Fix time window incompatibility (Conservative/Balanced windows miss 9:17 signal) | `[ ]` |
+| 0.17 | **BLOCKED:** Implement profit-gate enforcement in personality filter | `[ ]` |
+| 0.18 | Debug stop-loss logic (avg loss ₹-6 is unrealistic) | `[ ]` |
+| 0.19 | Docker Compose infra — TimescaleDB + Redis local setup | `[x]` |
 
-### Success Criteria
+### Success Criteria (Current Status)
 - [x] `npm run backtest` completes without errors on mock data
 - [x] All 4 test suites pass (`npm run test`)
 - [x] TypeScript compiles cleanly (`npm run build`)
-- [x] ESLint reports zero errors (`npm run lint`)
+- [ ] ESLint reports zero errors (`npm run lint`) — **FAILING: No config**
 - [x] CI pipeline is green on push to `main`
-- [x] Backtest report shows per-personality P&L, win rate, and Sharpe ratio
-- [x] Max drawdown and profit factor are computed correctly
+- [ ] Backtest report shows **all 3 personalities** active — **FAILING: Only Aggressive trades**
+- [ ] Each personality executes ≥10 trades — **FAILING: Conservative 0, Balanced 0**
+- [ ] Max drawdown > 0% (shows risk) — **FAILING: 0.00%**
+- [ ] Average loss is negative (realistic SL) — **FAILING: -₹6**
+- [ ] Win rate 40–60% (realistic) — **FAILING: 90.5%**
 - [x] Charge calculations match known broker fee schedules manually
+
+### Critical Bugs to Fix
+1. **Time window mismatch**: Conservative (09:25) and Balanced (09:20) windows don't align with 09:17 signal → only Aggressive trades
+2. **ESLint config missing**: `.eslintrc.json` doesn't exist → `npm run lint` fails
+3. **Profit-gate not implemented**: `personalityAllows()` doesn't check profit-gate condition
+4. **Backtest metrics unrealistic**: Likely due to #1 (only Aggressive personality executing)
 
 ---
 
@@ -257,7 +271,7 @@
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| **Phase 0** | Backtesting Foundation | `[x]` Complete |
+| **Phase 0** | Backtesting Foundation | `[!]` **Blocked** — 3 critical bugs (see `PHASE_0_BUG_REPORT.md`) |
 | **Phase 1** | Live Data Infrastructure | `[ ]` Not started |
 | **Phase 2** | Paper Trading Engine | `[ ]` Not started |
 | **Phase 3** | Retrospection & Parameter Evolution | `[ ]` Not started |
@@ -269,3 +283,17 @@
 ---
 
 *Update this file as each task completes: change `[ ]` → `[~]` when starting, `[~]` → `[x]` when done.*
+
+---
+
+## Phase 0 Bug Report
+
+**See `PHASE_0_BUG_REPORT.md` for detailed analysis of issues blocking Phase 0 completion.**
+
+Quick reference:
+- ❌ **P0 Bug 1**: Time window mismatch prevents Conservative/Balanced personalities from trading
+- ❌ **P0 Bug 2**: ESLint config file missing — `npm run lint` fails
+- ❌ **P0 Bug 3**: Profit-gate logic not implemented in personality filter
+- ⚠️ **P0 Issue 4**: Stop-loss appears ineffective (avg loss ₹-6) — needs investigation
+
+All must be resolved before Phase 1 can proceed.
