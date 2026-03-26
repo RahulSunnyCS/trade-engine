@@ -65,7 +65,8 @@ function personalityAllows(
   personality: PersonalityConfig,
   signal: TradingSignal,
   dayTrades: number,
-  snapshot: StraddleSnapshot
+  snapshot: StraddleSnapshot,
+  cumulativePnL: number
 ): boolean {
   if (!personality.isActive) return false;
   if (signal.winProbability < personality.minProbability) return false;
@@ -74,6 +75,12 @@ function personalityAllows(
   if (snapshot.vix < personality.minVix) return false;
   if (!personality.allowedRegimes.includes(signal.marketRegime)) return false;
   if (!personality.allowedUnderlyings.includes(signal.underlying)) return false;
+
+  // Profit gate check: if required, ensure cumulative P&L exceeds threshold
+  // Allow first trade (cumulativePnL === 0) to establish a position, then enforce threshold
+  if (personality.requireProfitGate && personality.profitGateThreshold > 0) {
+    if (cumulativePnL > 0 && cumulativePnL < personality.profitGateThreshold) return false;
+  }
 
   // Time window check
   const timeStr = signal.timeOfDay;
@@ -226,6 +233,11 @@ export class Backtester {
       this.config.personalities.map((p) => [p.id, 0])
     );
 
+    // Track cumulative P&L for each personality (for profit-gate check)
+    const personalityCumulativePnL = new Map<string, number>(
+      this.config.personalities.map((p) => [p.id, 0])
+    );
+
     for (const snapshot of dayData.snapshots) {
       history.push(snapshot);
 
@@ -236,7 +248,8 @@ export class Backtester {
       // Evaluate each personality
       for (const personality of this.config.personalities) {
         const dayCount = personalityDayCount.get(personality.id) ?? 0;
-        if (!personalityAllows(personality, signal, dayCount, snapshot)) continue;
+        const cumulativePnL = personalityCumulativePnL.get(personality.id) ?? 0;
+        if (!personalityAllows(personality, signal, dayCount, snapshot, cumulativePnL)) continue;
 
         // Entry delay: find snapshot closest to signal.timestamp + delaySeconds
         const entryTargetMs =
@@ -248,6 +261,7 @@ export class Backtester {
         const trade = simulateTrade(signal, personality, dayData, this.config, entrySnapshot);
         trades.push(trade);
         personalityDayCount.set(personality.id, dayCount + 1);
+        personalityCumulativePnL.set(personality.id, cumulativePnL + trade.netPnL);
       }
     }
 

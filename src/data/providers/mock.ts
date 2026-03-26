@@ -11,7 +11,7 @@
  */
 
 import { Underlying, StraddleSnapshot, DayData, HistoricalDataProvider } from '../../types';
-import { calculateATMStrike, daysToExpiry, getLotSize } from '../../signals/atmStrike';
+import { calculateATMStrike, daysToExpiry } from '../../signals/atmStrike';
 
 // ---- Baseline parameters --------------------------------
 
