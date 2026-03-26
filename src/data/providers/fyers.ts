@@ -49,7 +49,7 @@ class FyersClient {
   /**
    * Rate-limited HTTP request to Fyers API
    */
-  private async makeRequest(endpoint: string, params?: Record<string, unknown>): Promise<unknown> {
+  async makeRequest(endpoint: string, params?: Record<string, unknown>): Promise<unknown> {
     // Rate limiting: respect Fyers API limits
     const now = Date.now();
     const timeSinceLastRequest = now - this.lastRequestTime;
@@ -288,23 +288,85 @@ export class FyersDataProvider implements HistoricalDataProvider {
     return spotSymbols[underlying];
   }
 
-  private getWeeklyExpiryDate(date: Date, underlying: Underlying): Date {
-    // Expiry weekday depends on underlying:
-    //   NIFTY     → Thursday (4)
-    //   BANKNIFTY → Wednesday (3)
-    //   SENSEX    → Friday (5)
+  /**
+   * Fetch the current-week expiry date from the Fyers option-chain API.
+   *
+   * Fyers endpoint:  GET /optionchain?symbol=<spotSymbol>&strikecount=1
+   * The response contains `expiry_data` → array of expiry date strings (YYYY-MM-DD).
+   * We pick the nearest one that is >= today.
+   *
+   * Falls back to the hardcoded default if the API call fails or returns no data.
+   *
+   * Default expiry days (SEBI weekly schedule):
+   *   NIFTY  → Tuesday  (2)
+   *   SENSEX → Thursday (4)
+   */
+  async fetchCurrentWeekExpiry(date: Date, underlying: Underlying): Promise<Date> {
+    const defaultExpiry = this.computeDefaultExpiry(date, underlying);
+
+    try {
+      const optionChainSymbol = this.getOptionChainSymbol(underlying);
+      const response = (await this.client.makeRequest('/optionchain', {
+        symbol: optionChainSymbol,
+        strikecount: 1,
+      })) as { data?: { expiryData?: Array<{ date: string }> } };
+
+      const expiryList = response?.data?.expiryData;
+      if (!Array.isArray(expiryList) || expiryList.length === 0) {
+        return defaultExpiry;
+      }
+
+      // Find the nearest expiry on or after `date`
+      const today = new Date(date);
+      today.setHours(0, 0, 0, 0);
+
+      const upcoming = expiryList
+        .map((e) => new Date(e.date))
+        .filter((d) => d >= today)
+        .sort((a, b) => a.getTime() - b.getTime());
+
+      return upcoming.length > 0 ? upcoming[0] : defaultExpiry;
+    } catch {
+      // Network/auth failure — fall back to static schedule
+      return defaultExpiry;
+    }
+  }
+
+  /** Returns the Fyers option-chain symbol for a given underlying. */
+  private getOptionChainSymbol(underlying: Underlying): string {
+    const symbols: Record<Underlying, string> = {
+      NIFTY: 'NSE:NIFTY50-INDEX',
+      BANKNIFTY: 'NSE:NIFTYBANK-INDEX',
+      SENSEX: 'BSE:SENSEX-INDEX',
+    };
+    return symbols[underlying];
+  }
+
+  /**
+   * Compute the default (static) weekly expiry date for a given underlying.
+   *
+   * Default weekdays:
+   *   NIFTY  → Tuesday  (2)
+   *   BANKNIFTY → Wednesday (3)
+   *   SENSEX → Thursday (4)
+   */
+  private computeDefaultExpiry(date: Date, underlying: Underlying): Date {
     const expiryDayMap: Record<Underlying, number> = {
-      NIFTY: 4,
+      NIFTY: 2,
       BANKNIFTY: 3,
-      SENSEX: 5,
+      SENSEX: 4,
     };
     const expiryDay = expiryDayMap[underlying];
     const d = new Date(date);
-    // Advance only if today is not already the expiry day
-    while (d.getDay() !== expiryDay) {
-      d.setDate(d.getDate() + 1);
-    }
+    d.setHours(0, 0, 0, 0);
+    // Advance to the next occurrence of the expiry weekday (same day is fine)
+    const daysUntil = (expiryDay - d.getDay() + 7) % 7;
+    d.setDate(d.getDate() + daysUntil);
     return d;
+  }
+
+  private getWeeklyExpiryDate(date: Date, underlying: Underlying): Date {
+    return this.computeDefaultExpiry(date, underlying);
   }
 
   private getNSEHolidays(): Set<string> {

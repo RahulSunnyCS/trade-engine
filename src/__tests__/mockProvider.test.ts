@@ -62,11 +62,11 @@ describe('MockDataProvider', () => {
     expect(day1!.snapshots[0].spotPrice).not.toBe(day2!.snapshots[0].spotPrice);
   });
 
-  test('BANKNIFTY spot is ~2x NIFTY (baseline)', async () => {
+  test('SENSEX spot is higher than NIFTY (baseline)', async () => {
     const day = new Date('2024-01-01');
-    const nifty   = await provider.getDayData(day, 'NIFTY');
-    const banknifty = await provider.getDayData(day, 'BANKNIFTY');
-    expect(banknifty!.snapshots[0].spotPrice).toBeGreaterThan(
+    const nifty  = await provider.getDayData(day, 'NIFTY');
+    const sensex = await provider.getDayData(day, 'SENSEX');
+    expect(sensex!.snapshots[0].spotPrice).toBeGreaterThan(
       nifty!.snapshots[0].spotPrice
     );
   });

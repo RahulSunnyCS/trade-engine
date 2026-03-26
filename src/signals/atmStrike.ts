@@ -46,18 +46,29 @@ export function getLotSize(underlying: Underlying): number {
   return LOT_SIZES[underlying];
 }
 
+// Default expiry weekdays (overridable via Fyers API lookup)
+// NIFTY  → Tuesday (2)
+// SENSEX → Thursday (4)
+export const DEFAULT_EXPIRY_DOW: Record<Underlying, number> = {
+  NIFTY: 2,
+  BANKNIFTY: 3, // Wednesday (kept for backward-compat, not actively tested)
+  SENSEX: 4,
+};
+
 /**
  * Determine the nearest weekly expiry date from a given date.
- * Nifty/BankNifty expire on Thursday; Sensex on Friday.
+ * NIFTY expires on Tuesday; SENSEX on Thursday.
+ * Pass an explicit `expiryDow` (0=Sun…6=Sat) to override the default
+ * (e.g. when the value has been fetched live from the Fyers option-chain API).
  */
-export function getNearestExpiry(fromDate: Date, underlying: Underlying): Date {
-  const expiryDow = underlying === 'SENSEX' ? 5 : 4; // 4=Thu, 5=Fri
+export function getNearestExpiry(fromDate: Date, underlying: Underlying, expiryDow?: number): Date {
+  const dow = expiryDow ?? DEFAULT_EXPIRY_DOW[underlying];
   const d = new Date(fromDate);
   // Zero out time so we compare dates only
   d.setHours(0, 0, 0, 0);
 
   const currentDow = d.getDay();
-  let daysUntilExpiry = (expiryDow - currentDow + 7) % 7;
+  let daysUntilExpiry = (dow - currentDow + 7) % 7;
   // If today IS the expiry day, expiry is today (0 → 0)
   if (daysUntilExpiry === 0) daysUntilExpiry = 0;
 
