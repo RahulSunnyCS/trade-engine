@@ -277,4 +277,50 @@ describe('FyersDataProvider', () => {
       expect(ready).toBe(false);
     });
   });
+
+  describe('fetchCurrentWeekExpiry()', () => {
+    it('returns expiry from Fyers option-chain API when available', async () => {
+      // Mock the option-chain response with a future expiry date
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: {
+            expiryData: [
+              { date: '2024-03-19' }, // Tuesday
+              { date: '2024-03-26' }, // Tuesday (next week)
+            ],
+          },
+        }),
+      });
+
+      const date = new Date('2024-03-18'); // Monday
+      const expiry = await provider.fetchCurrentWeekExpiry(date, 'NIFTY');
+
+      // Should pick the nearest upcoming expiry (2024-03-19)
+      expect(expiry.toISOString().slice(0, 10)).toBe('2024-03-19');
+    });
+
+    it('falls back to default Tuesday expiry for NIFTY when API fails', async () => {
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+      const date = new Date('2024-03-18'); // Monday
+      const expiry = await provider.fetchCurrentWeekExpiry(date, 'NIFTY');
+
+      // Default: NIFTY → Tuesday (2024-03-19)
+      expect(expiry.getDay()).toBe(2); // Tuesday
+    });
+
+    it('falls back to default Thursday expiry for SENSEX when API returns empty', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: { expiryData: [] } }),
+      });
+
+      const date = new Date('2024-03-18'); // Monday
+      const expiry = await provider.fetchCurrentWeekExpiry(date, 'SENSEX');
+
+      // Default: SENSEX → Thursday (2024-03-21)
+      expect(expiry.getDay()).toBe(4); // Thursday
+    });
+  });
 });
